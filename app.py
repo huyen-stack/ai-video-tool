@@ -9,6 +9,7 @@ import concurrent.futures
 import json
 from datetime import datetime
 import yt_dlp  # 用于从抖音/B站/TikTok/YouTube 等下载视频
+from typing import Optional, Tuple, List, Dict, Any
 
 # ========================
 # 全局配置
@@ -27,7 +28,7 @@ if "analysis_history" not in st.session_state:
     # 每条元素结构：
     # {
     #   "id": "run_1",
-    #   "created_at": "2025-11-23 15:30:01",
+    #   "created_at": "...",
     #   "meta": {...},
     #   "data": {... 完整 export_data ...}
     # }
@@ -73,10 +74,10 @@ st.markdown(
         border: 1px solid rgba(148, 163, 184, 0.35);
     ">
       <h1 style="margin: 0 0 8px 0; color: #e5e7eb; font-size: 1.6rem;">
-        🎬 AI 自动关键帧分镜助手 Pro · Midjourney 提示词 + 历史记录 + 链接解析
+        🎬 AI 自动关键帧分镜助手 Pro · Midjourney 提示词 + 时间区间 + 历史记录
       </h1>
       <p style="margin: 0; color: #cbd5f5; font-size: 0.96rem;">
-        上传视频或输入抖音/B站/TikTok/YouTube 链接，自动抽取关键帧，生成
+        上传视频或输入抖音/B站/TikTok/YouTube 链接，设置分析时间区间，自动抽取关键帧，生成
         <b>结构化 JSON + Midjourney 提示词 + 分镜解读 + 剧情大纲 + 10 秒广告旁白</b>，
         并在当前会话中保存多条分析记录，方便对比与下载。
       </p>
@@ -87,7 +88,7 @@ st.markdown(
 
 
 # ========================
-# 抽关键帧（根据时长自动决定数量）
+# 抽关键帧（支持时间区间）
 # ========================
 
 def extract_keyframes_dynamic(
@@ -95,13 +96,19 @@ def extract_keyframes_dynamic(
     min_frames: int = 6,
     max_frames: int = 30,
     base_fps: float = 0.8,
-):
+    start_sec: Optional[float] = None,
+    end_sec: Optional[float] = None,
+) -> Tuple[List[Image.Image], float, Tuple[float, float]]:
     """
-    根据视频时长自动抽取关键帧：
-    - ideal_n = duration * base_fps
+    根据视频时长自动抽取关键帧，仅在 [start_sec, end_sec] 范围内。
+    - ideal_n = segment_duration * base_fps
     - 限制在 [min_frames, max_frames]
     - 均匀抽帧
-    返回 PIL.Image 列表 + 时长秒数
+
+    返回：
+      images: 抽到的 PIL.Image 列表
+      duration: 整条视频总时长（秒）
+      used_range: (start_used, end_used) 实际生效的分析时间范围（秒）
     """
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -111,21 +118,42 @@ def extract_keyframes_dynamic(
 
     if total_frames <= 0:
         cap.release()
-        return [], 0.0
+        return [], 0.0, (0.0, 0.0)
 
-    duration = total_frames / fps  # 秒
-    ideal_n = int(duration * base_fps)
+    duration = total_frames / fps  # 整条视频时长
+
+    # 规范化时间范围
+    if start_sec is None or start_sec < 0:
+        start_sec = 0.0
+    if end_sec is None or end_sec <= start_sec or end_sec > duration:
+        end_sec = duration
+
+    start_frame = int(start_sec * fps)
+    end_frame_excl = min(total_frames, int(end_sec * fps))
+    segment_frames = end_frame_excl - start_frame
+
+    # 防御：如果时间范围非法，就退回整段视频
+    if segment_frames <= 0:
+        start_sec = 0.0
+        end_sec = duration
+        start_frame = 0
+        end_frame_excl = total_frames
+        segment_frames = total_frames
+
+    segment_duration = segment_frames / fps
+
+    ideal_n = int(segment_duration * base_fps)
     target_n = max(min_frames, ideal_n)
-    target_n = min(target_n, max_frames, total_frames)
+    target_n = min(target_n, max_frames, segment_frames)
 
     if target_n <= 0:
         cap.release()
-        return [], duration
+        return [], duration, (start_sec, end_sec)
 
-    step = total_frames / float(target_n)
-    frame_indices = [int(i * step) for i in range(target_n)]
+    step = segment_frames / float(target_n)
+    frame_indices = [start_frame + int(i * step) for i in range(target_n)]
 
-    images = []
+    images: List[Image.Image] = []
     for idx in frame_indices:
         cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
         ret, frame = cap.read()
@@ -136,7 +164,7 @@ def extract_keyframes_dynamic(
             images.append(Image.new("RGB", (200, 200), color="gray"))
 
     cap.release()
-    return images, duration
+    return images, duration, (start_sec, end_sec)
 
 
 # ========================
@@ -174,8 +202,8 @@ def download_video_from_url(url: str) -> str:
 # ========================
 
 def get_color_palette(pil_img: Image.Image, num_colors: int = 5):
-    img = pil_img.resize((120, 120))
-    arr = np.array(pil_img.resize((120, 120)))
+    img_small = pil_img.resize((120, 120))
+    arr = np.array(img_small)
     data = arr.reshape((-1, 3)).astype(np.float32)
 
     criteria = (
@@ -254,7 +282,7 @@ def _extract_text_from_response(resp) -> str:
 # 单帧分析：结构化 JSON + MJ 提示词
 # ========================
 
-def analyze_single_image(img: Image.Image, model, index: int):
+def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
     """
     输出一个结构化 dict：
     {
@@ -344,7 +372,9 @@ def analyze_single_image(img: Image.Image, model, index: int):
         }
 
 
-def analyze_images_concurrently(images, model, max_ai_frames: int):
+def analyze_images_concurrently(
+    images: List[Image.Image], model, max_ai_frames: int
+) -> List[Dict[str, Any]]:
     """
     并发分析多张图片。
     只对前 max_ai_frames 帧做 AI 调用，其余帧用占位说明。
@@ -354,7 +384,7 @@ def analyze_images_concurrently(images, model, max_ai_frames: int):
         return []
 
     use_n = min(max_ai_frames, n)
-    results = [None] * n
+    results: List[Dict[str, Any]] = [None] * n  # type: ignore
 
     status = st.empty()
     status.info(f"⚡ 正在对前 {use_n} 帧进行 AI 分析（共 {n} 帧），其余帧保留截图与色卡。")
@@ -410,7 +440,7 @@ def analyze_images_concurrently(images, model, max_ai_frames: int):
 # 整体视频层面的总结
 # ========================
 
-def analyze_overall_video(frame_infos, model):
+def analyze_overall_video(frame_infos: List[Dict[str, Any]], model) -> str:
     described = [
         info
         for info in frame_infos
@@ -474,7 +504,7 @@ def analyze_overall_video(frame_infos, model):
 # 10 秒广告旁白脚本生成
 # ========================
 
-def generate_ad_script(frame_infos, model):
+def generate_ad_script(frame_infos: List[Dict[str, Any]], model) -> str:
     described = [
         info
         for info in frame_infos
@@ -546,6 +576,19 @@ with st.sidebar:
     )
     st.caption("建议：10 秒视频 6~10 帧即可；超出部分仍会显示截图和色卡，但不调 AI。")
 
+    # ⭐ 新增：分析时间范围（秒）
+    st.markdown("---")
+    st.markdown("⏱ 分析时间范围（单位：秒）")
+    start_sec = st.number_input(
+        "从第几秒开始（含）", min_value=0.0, value=0.0, step=0.5,
+        help="精确到 0.5 秒；默认 0 表示从头开始"
+    )
+    end_sec = st.number_input(
+        "到第几秒结束（0 或 ≤开始秒 表示直到结尾）",
+        min_value=0.0, value=0.0, step=0.5,
+        help="例如：只分析 3~8 秒，就填 3 和 8；填 0 或不大于开始秒则分析到结尾"
+    )
+
     if not api_key:
         st.warning("🔴 还没有 Key，先去 https://ai.google.dev/ 申请一个")
     else:
@@ -577,7 +620,7 @@ source_mode = st.radio(
     index=0,
 )
 
-video_url = None
+video_url: Optional[str] = None
 uploaded_file = None
 
 if source_mode == "上传本地文件":
@@ -595,7 +638,7 @@ if st.button("🚀 一键解析整条视频"):
     if not api_key or model is None:
         st.error("请先在左侧输入有效的 Google API Key。")
     else:
-        tmp_path = None
+        tmp_path: Optional[str] = None
         source_label = ""
         source_type = ""
 
@@ -624,10 +667,16 @@ if st.button("🚀 一键解析整条视频"):
                 st.error("视频路径异常，请重试。")
                 st.stop()
 
-            # 2. 抽关键帧
-            st.info("⏳ 正在根据视频时长自动抽取关键帧...")
-            images, duration = extract_keyframes_dynamic(tmp_path)
+            # 2. 抽关键帧（带时间区间）
+            st.info("⏳ 正在根据指定时间区间自动抽取关键帧...")
+            images, duration, used_range = extract_keyframes_dynamic(
+                tmp_path,
+                start_sec=start_sec,
+                end_sec=end_sec if end_sec > 0 else None,
+            )
+            start_used, end_used = used_range
 
+            # 用完删除临时文件
             try:
                 os.remove(tmp_path)
             except OSError:
@@ -638,11 +687,12 @@ if st.button("🚀 一键解析整条视频"):
                 st.stop()
 
             st.success(
-                f"✅ 已成功抽取 {len(images)} 个关键帧（视频约 {duration:.1f} 秒，本次最多对 {max_ai_frames} 帧做 AI 分析）。"
+                f"✅ 已成功抽取 {len(images)} 个关键帧（视频总长约 {duration:.1f} 秒，"
+                f"本次分析区间：{start_used:.1f}–{end_used:.1f} 秒，最多对 {max_ai_frames} 帧做 AI 分析）。"
             )
 
             # 3. 计算主色调
-            frame_palettes = []
+            frame_palettes: List[List[Tuple[int, int, int]]] = []
             for img in images:
                 try:
                     palette_colors = get_color_palette(img, num_colors=5)
@@ -687,6 +737,8 @@ if st.button("🚀 一键解析整条视频"):
                     "frame_count": len(images),
                     "max_ai_frames_this_run": max_ai_frames,
                     "duration_sec_est": duration,
+                    "start_sec_used": start_used,
+                    "end_sec_used": end_used,
                     "source_type": source_type,      # upload / url
                     "source_label": source_label,    # 文件名 或 链接
                 },
@@ -821,9 +873,9 @@ if st.button("🚀 一键解析整条视频"):
                 if not history:
                     st.info("当前会话还没有任何历史记录。")
                 else:
-                    # 最近的一条在列表最上方显示
                     options = [
-                        f"{len(history) - i}. {h['created_at']} | {h['meta'].get('source_label','')} | {h['meta'].get('frame_count',0)} 帧"
+                        f"{len(history) - i}. {h['created_at']} | {h['meta'].get('source_label','')} | "
+                        f"{h['meta'].get('frame_count',0)} 帧 | 区间 {h['meta'].get('start_sec_used',0):.1f}-{h['meta'].get('end_sec_used',0):.1f}s"
                         for i, h in enumerate(reversed(history))
                     ]
                     idx_display = st.selectbox(
@@ -839,6 +891,7 @@ if st.button("🚀 一键解析整条视频"):
                         f"**时间：** {selected['created_at']}  \n"
                         f"**来源类型：** {selected['meta'].get('source_type','')}  \n"
                         f"**来源标识：** {selected['meta'].get('source_label','')}  \n"
+                        f"**分析区间：** {selected['meta'].get('start_sec_used',0):.1f}–{selected['meta'].get('end_sec_used',0):.1f} 秒  \n"
                         f"**帧数：** {selected['meta'].get('frame_count',0)}  \n"
                         f"**模型：** {selected['meta'].get('model','')}"
                     )
