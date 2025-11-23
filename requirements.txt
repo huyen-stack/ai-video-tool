@@ -1,5 +1,5 @@
-streamlit==1.32.0
-google-generative-ai==0.5.0
-opencv-python-headless==4.9.0.80
+streamlit
+google-generative-ai
+opencv-python-headless
 Pillow
 numpy
