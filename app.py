@@ -78,25 +78,4 @@ if api_key:
     uploaded_file = st.file_uploader("📂 第二步：拖入视频 (建议 < 50MB)", type=['mp4', 'mov'])
 
     if uploaded_file and st.button("🚀 开始极速分析"):
-        tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-        tfile.write(uploaded_file.read())
-        video_path = tfile.name
-        
-        with st.spinner('正在截取关键帧...'):
-            keyframes = extract_6_keyframes(video_path)
-            
-        if keyframes:
-            descriptions = analyze_images_concurrently(keyframes, model)
-            st.success("✅ 分析完成！")
-            st.divider()
-            
-            cols = st.columns(6)
-            for i, col in enumerate(cols):
-                with col:
-                    st.image(keyframes[i], use_column_width=True, caption=f"镜头 {i+1}")
-                    st.info(descriptions[i])
-                    
-        os.remove(video_path)
-
-elif not api_key:
-    st.info("👈 请先在左侧输入 Key")
+        t
