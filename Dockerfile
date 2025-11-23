@@ -1,12 +1,12 @@
-# 1. 指定使用 Python 3.10 (稳定版，完美支持 Google AI)
+# 1. 指定使用 Python 3.10
 FROM python:3.10-slim
 
 # 2. 设置工作目录
 WORKDIR /app
 
-# 3. 强制安装 OpenCV 需要的系统“零件” (解决系统库缺失问题)
+# 3. 【修正】安装 OpenCV 需要的系统库 (这里改好了!)
 RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
