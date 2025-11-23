@@ -1,9 +1,8 @@
-# 1. 换车：使用 Python 3.11 (更强的环境，强制刷新缓存)
-FROM python:3.11-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
-# 2. 安装系统依赖
+# 1. 安装系统库
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
@@ -11,10 +10,17 @@ RUN apt-get update && apt-get install -y \
 
 COPY . .
 
-# 3. 【核武器】强制指定使用官方源下载，防止 Zeabur 内部源抽风
+# 2. 升级 pip
 RUN pip install --upgrade pip
-RUN pip install google-generative-ai -i https://pypi.org/simple
-RUN pip install streamlit opencv-python-headless Pillow numpy -i https://pypi.org/simple
+
+# 3. 【决胜一招】使用清华大学镜像源安装
+# 这通常能解决腾讯云节点连不上官方库的问题
+RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    google-generative-ai \
+    streamlit \
+    opencv-python-headless \
+    Pillow \
+    numpy
 
 EXPOSE 8501
 
