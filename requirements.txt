@@ -1,5 +1,5 @@
-streamlit
-google-generative-ai
-opencv-python-headless
-Pillow
+streamlit>=1.38,<2
+google-generativeai>=0.8.3,<1   # ← 这里少一个“-”
+opencv-python-headless>=4.9.0.80,<5
+Pillow>=10,<11
 numpy<2
