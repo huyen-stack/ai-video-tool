@@ -8,12 +8,13 @@ from PIL import Image, ImageDraw
 import concurrent.futures
 import json
 from datetime import datetime
+import yt_dlp  # 用于从抖音/B站/TikTok/YouTube 等下载视频
 
 # ========================
 # 全局配置
 # ========================
 
-GEMINI_MODEL_NAME = "gemini-flash-latest"  # 可按需替换
+GEMINI_MODEL_NAME = "gemini-flash-latest"  # 可按需替换，比如 gemini-2.5-flash-lite
 
 DISPLAY_IMAGE_WIDTH = 320
 PALETTE_WIDTH = 320
@@ -72,10 +73,10 @@ st.markdown(
         border: 1px solid rgba(148, 163, 184, 0.35);
     ">
       <h1 style="margin: 0 0 8px 0; color: #e5e7eb; font-size: 1.6rem;">
-        🎬 AI 自动关键帧分镜助手 Pro · Midjourney 提示词 + 历史记录
+        🎬 AI 自动关键帧分镜助手 Pro · Midjourney 提示词 + 历史记录 + 链接解析
       </h1>
       <p style="margin: 0; color: #cbd5f5; font-size: 0.96rem;">
-        上传视频，自动抽取关键帧，生成
+        上传视频或输入抖音/B站/TikTok/YouTube 链接，自动抽取关键帧，生成
         <b>结构化 JSON + Midjourney 提示词 + 分镜解读 + 剧情大纲 + 10 秒广告旁白</b>，
         并在当前会话中保存多条分析记录，方便对比与下载。
       </p>
@@ -139,12 +140,42 @@ def extract_keyframes_dynamic(
 
 
 # ========================
+# 从链接下载视频（抖音/B站/TikTok/YouTube 等）
+# ========================
+
+def download_video_from_url(url: str) -> str:
+    """
+    使用 yt-dlp 从给定 URL 下载视频到临时文件，返回本地文件路径。
+    适用于抖音 / TikTok / B站 / YouTube 等支持站点。
+    """
+    if not url:
+        raise ValueError("视频链接为空")
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp_path = tmp.name
+    tmp.close()
+
+    ydl_opts = {
+        "format": "mp4/bestvideo+bestaudio/best",
+        "outtmpl": tmp_path,
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+    return tmp_path
+
+
+# ========================
 # 主色调色卡相关
 # ========================
 
 def get_color_palette(pil_img: Image.Image, num_colors: int = 5):
     img = pil_img.resize((120, 120))
-    arr = np.array(img)
+    arr = np.array(pil_img.resize((120, 120)))
     data = arr.reshape((-1, 3)).astype(np.float32)
 
     criteria = (
@@ -536,38 +567,81 @@ if api_key:
 
 
 # ========================
-# 主流程：上传视频 + 抽帧 + 分析 + 布局展示
+# 主流程：上传/链接 选择 + 抽帧 + 分析 + 布局展示
 # ========================
 
-uploaded_file = st.file_uploader(
-    "📂 第二步：拖入视频文件（建议 < 50MB）",
-    type=["mp4", "mov", "m4v", "avi", "mpeg"],
+# 选择视频来源
+source_mode = st.radio(
+    "📥 选择视频来源",
+    ["上传本地文件", "输入网络视频链接（抖音 / B站 / TikTok / YouTube）"],
+    index=0,
 )
 
-if uploaded_file and st.button("🚀 一键解析整条视频"):
+video_url = None
+uploaded_file = None
+
+if source_mode == "上传本地文件":
+    uploaded_file = st.file_uploader(
+        "📂 上传视频文件（建议 < 50MB）",
+        type=["mp4", "mov", "m4v", "avi", "mpeg"],
+    )
+else:
+    video_url = st.text_input(
+        "🔗 输入视频链接",
+        placeholder="例如：https://v.douyin.com/xxxxxx 或 https://www.douyin.com/video/xxxxxxxxx",
+    )
+
+if st.button("🚀 一键解析整条视频"):
     if not api_key or model is None:
         st.error("请先在左侧输入有效的 Google API Key。")
     else:
-        suffix = os.path.splitext(uploaded_file.name)[1] or ".mp4"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(uploaded_file.read())
-            tmp_path = tmp.name
-
-        st.info("⏳ 正在根据视频时长自动抽取关键帧...")
-        images, duration = extract_keyframes_dynamic(tmp_path)
+        tmp_path = None
+        source_label = ""
+        source_type = ""
 
         try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+            # 1. 准备本地视频文件路径
+            if source_mode == "上传本地文件":
+                source_type = "upload"
+                if not uploaded_file:
+                    st.error("请先上传一个视频文件。")
+                    st.stop()
+                suffix = os.path.splitext(uploaded_file.name)[1] or ".mp4"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    tmp.write(uploaded_file.read())
+                    tmp_path = tmp.name
+                source_label = uploaded_file.name
+            else:
+                source_type = "url"
+                if not video_url:
+                    st.error("请输入一个有效的视频链接。")
+                    st.stop()
+                st.info("🌐 正在从网络下载视频，请稍候...")
+                tmp_path = download_video_from_url(video_url)
+                source_label = video_url
 
-        if not images:
-            st.error("❌ 无法从视频中读取帧，请检查视频文件是否损坏或格式异常。")
-        else:
+            if not tmp_path:
+                st.error("视频路径异常，请重试。")
+                st.stop()
+
+            # 2. 抽关键帧
+            st.info("⏳ 正在根据视频时长自动抽取关键帧...")
+            images, duration = extract_keyframes_dynamic(tmp_path)
+
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+            if not images:
+                st.error("❌ 无法从视频中读取帧，请检查视频是否损坏或格式异常。")
+                st.stop()
+
             st.success(
                 f"✅ 已成功抽取 {len(images)} 个关键帧（视频约 {duration:.1f} 秒，本次最多对 {max_ai_frames} 帧做 AI 分析）。"
             )
 
+            # 3. 计算主色调
             frame_palettes = []
             for img in images:
                 try:
@@ -576,6 +650,7 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
                     palette_colors = []
                 frame_palettes.append(palette_colors)
 
+            # 4. 调 Gemini 做逐帧分析
             with st.spinner("🧠 正在为关键帧生成结构化分析 + Midjourney 提示词..."):
                 frame_infos = analyze_images_concurrently(
                     images, model, max_ai_frames=max_ai_frames
@@ -586,7 +661,7 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
             with st.spinner("🎤 正在生成 10 秒广告旁白脚本..."):
                 ad_script = generate_ad_script(frame_infos, model)
 
-            # ==== 生成 export_data，并保存到 session 历史 ====
+            # 5. 组装 export_data，并写入历史记录
             export_frames = []
             for info, palette in zip(frame_infos, frame_palettes):
                 export_frames.append(
@@ -612,7 +687,8 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
                     "frame_count": len(images),
                     "max_ai_frames_this_run": max_ai_frames,
                     "duration_sec_est": duration,
-                    "source_filename": uploaded_file.name,
+                    "source_type": source_type,      # upload / url
+                    "source_label": source_label,    # 文件名 或 链接
                 },
                 "frames": export_frames,
                 "overall_analysis": overall,
@@ -621,7 +697,7 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
 
             json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
 
-            # 保存到当前会话的历史记录
+            # 历史记录入库
             history = st.session_state["analysis_history"]
             run_id = f"run_{len(history) + 1}"
             history.append(
@@ -634,9 +710,14 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
             )
             st.session_state["analysis_history"] = history
 
-            # ==== UI Tabs ====
+            # 6. Tabs 展示
             tab_frames, tab_story, tab_json, tab_history = st.tabs(
-                ["🎞 关键帧 & MJ 提示词", "📚 剧情总结 & 广告旁白", "📦 JSON 导出（本次）", "🕘 历史记录（本会话）"]
+                [
+                    "🎞 关键帧 & MJ 提示词",
+                    "📚 剧情总结 & 广告旁白",
+                    "📦 JSON 导出（本次）",
+                    "🕘 历史记录（本会话）",
+                ]
             )
 
             # --- Tab1：逐帧卡片 ---
@@ -740,29 +821,28 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
                 if not history:
                     st.info("当前会话还没有任何历史记录。")
                 else:
+                    # 最近的一条在列表最上方显示
                     options = [
-                        f"{len(history) - i}. {h['created_at']} | {h['meta'].get('source_filename','')} | {h['meta'].get('frame_count',0)} 帧"
+                        f"{len(history) - i}. {h['created_at']} | {h['meta'].get('source_label','')} | {h['meta'].get('frame_count',0)} 帧"
                         for i, h in enumerate(reversed(history))
                     ]
-                    # 为了让最近的一条在最上面，我们翻转一下索引
                     idx_display = st.selectbox(
                         "选择一条历史记录查看",
                         options=list(range(len(history))),
                         format_func=lambda i: options[i],
                     )
-                    # 把 display 索引映射回真实索引（历史里最新在末尾）
                     real_index = len(history) - 1 - idx_display
                     selected = history[real_index]
 
                     st.markdown(
                         f"**ID：** `{selected['id']}`  \n"
                         f"**时间：** {selected['created_at']}  \n"
-                        f"**源文件：** {selected['meta'].get('source_filename','')}  \n"
+                        f"**来源类型：** {selected['meta'].get('source_type','')}  \n"
+                        f"**来源标识：** {selected['meta'].get('source_label','')}  \n"
                         f"**帧数：** {selected['meta'].get('frame_count',0)}  \n"
                         f"**模型：** {selected['meta'].get('model','')}"
                     )
 
-                    # 下载这条历史记录的 JSON
                     hist_json = json.dumps(
                         selected["data"], ensure_ascii=False, indent=2
                     )
@@ -773,7 +853,6 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
                         mime="application/json",
                     )
 
-                    # 简单预览：前三帧的 MJ 提示词
                     frames = selected["data"].get("frames", [])
                     if frames:
                         st.markdown("#### 部分帧预览（场景 + MJ 提示词）")
@@ -784,3 +863,6 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
                             if mj:
                                 st.code(mj, language="markdown")
                             st.markdown("---")
+
+        except Exception as e:
+            st.error(f"下载或解析视频时发生错误：{e}")
