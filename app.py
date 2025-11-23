@@ -7,22 +7,30 @@ import numpy as np
 from PIL import Image, ImageDraw
 import concurrent.futures
 import json
-
+from datetime import datetime
 
 # ========================
 # 全局配置
 # ========================
 
-# 可按需替换：
-#   "gemini-flash-latest"
-#   "gemini-2.5-flash-lite"
-#   "gemini-2.5-flash"
-GEMINI_MODEL_NAME = "gemini-flash-latest"
+GEMINI_MODEL_NAME = "gemini-flash-latest"  # 可按需替换
 
-# 展示时的图片与色卡宽度
 DISPLAY_IMAGE_WIDTH = 320
 PALETTE_WIDTH = 320
 PALETTE_HEIGHT = 26
+
+# 初始化会话状态：API Key + 历史记录
+if "api_key" not in st.session_state:
+    st.session_state["api_key"] = ""
+if "analysis_history" not in st.session_state:
+    # 每条元素结构：
+    # {
+    #   "id": "run_1",
+    #   "created_at": "2025-11-23 15:30:01",
+    #   "meta": {...},
+    #   "data": {... 完整 export_data ...}
+    # }
+    st.session_state["analysis_history"] = []
 
 
 # ========================
@@ -64,12 +72,12 @@ st.markdown(
         border: 1px solid rgba(148, 163, 184, 0.35);
     ">
       <h1 style="margin: 0 0 8px 0; color: #e5e7eb; font-size: 1.6rem;">
-        🎬 AI 自动关键帧分镜助手 Pro · Midjourney 提示词版
+        🎬 AI 自动关键帧分镜助手 Pro · Midjourney 提示词 + 历史记录
       </h1>
       <p style="margin: 0; color: #cbd5f5; font-size: 0.96rem;">
-        上传一个视频，自动抽取关键帧，生成
+        上传视频，自动抽取关键帧，生成
         <b>结构化 JSON + Midjourney 提示词 + 分镜解读 + 剧情大纲 + 10 秒广告旁白</b>，
-        直接当「AI 导演 + MJ 提示词工程师」使用。
+        并在当前会话中保存多条分析记录，方便对比与下载。
       </p>
     </div>
     """,
@@ -89,10 +97,10 @@ def extract_keyframes_dynamic(
 ):
     """
     根据视频时长自动抽取关键帧：
-    - 估算目标帧数: ideal_n = duration * base_fps
+    - ideal_n = duration * base_fps
     - 限制在 [min_frames, max_frames]
     - 均匀抽帧
-    返回 PIL.Image 列表。
+    返回 PIL.Image 列表 + 时长秒数
     """
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -135,9 +143,6 @@ def extract_keyframes_dynamic(
 # ========================
 
 def get_color_palette(pil_img: Image.Image, num_colors: int = 5):
-    """
-    使用 KMeans 聚类提取图片主色调，返回 [(R,G,B), ...]。
-    """
     img = pil_img.resize((120, 120))
     arr = np.array(img)
     data = arr.reshape((-1, 3)).astype(np.float32)
@@ -163,9 +168,6 @@ def get_color_palette(pil_img: Image.Image, num_colors: int = 5):
 
 
 def make_palette_image(colors, width: int = PALETTE_WIDTH, height: int = PALETTE_HEIGHT):
-    """
-    把一组 RGB 颜色画成一条水平色卡条。
-    """
     if not colors:
         return Image.new("RGB", (width, height), color="gray")
 
@@ -192,9 +194,6 @@ def rgb_to_hex(rgb_tuple):
 # ========================
 
 def _extract_text_from_response(resp) -> str:
-    """
-    兼容不同版本 SDK 的 Gemini 响应解析。
-    """
     text = getattr(resp, "text", None)
     if text and isinstance(text, str) and text.strip():
         return text.strip()
@@ -221,7 +220,7 @@ def _extract_text_from_response(resp) -> str:
 
 
 # ========================
-# 单帧分析：生成结构化 JSON + MJ 提示词
+# 单帧分析：结构化 JSON + MJ 提示词
 # ========================
 
 def analyze_single_image(img: Image.Image, model, index: int):
@@ -231,12 +230,7 @@ def analyze_single_image(img: Image.Image, model, index: int):
       "index": index,
       "scene_description_zh": ...,
       "tags_zh": [...],
-      "camera": {
-        "shot_type_zh": ...,
-        "angle_zh": ...,
-        "movement_zh": ...,
-        "composition_zh": ...
-      },
+      "camera": {...},
       "color_and_light_zh": ...,
       "mood_zh": ...,
       "midjourney_prompt": ...,
@@ -277,7 +271,6 @@ def analyze_single_image(img: Image.Image, model, index: int):
         if not text:
             raise ValueError("模型未返回文本")
 
-        # 尝试从文本中截取 JSON 子串
         start = text.find("{")
         end = text.rfind("}")
         if start == -1 or end == -1 or end <= start:
@@ -286,10 +279,7 @@ def analyze_single_image(img: Image.Image, model, index: int):
         json_str = text[start : end + 1]
         info = json.loads(json_str)
 
-        # 确保 index 存在且正确
         info["index"] = index
-
-        # 填充默认结构，避免后续 KeyError
         info.setdefault("scene_description_zh", "")
         info.setdefault("tags_zh", [])
         info.setdefault("camera", {})
@@ -306,7 +296,6 @@ def analyze_single_image(img: Image.Image, model, index: int):
         return info
 
     except Exception as e:
-        # 解析失败时返回一个占位结构
         return {
             "index": index,
             "scene_description_zh": f"（AI 分析失败：{e}）",
@@ -326,9 +315,8 @@ def analyze_single_image(img: Image.Image, model, index: int):
 
 def analyze_images_concurrently(images, model, max_ai_frames: int):
     """
-    并发分析多张图片，加速整体速度。
+    并发分析多张图片。
     只对前 max_ai_frames 帧做 AI 调用，其余帧用占位说明。
-    返回：长度等于 images 的列表，每个元素是上面定义的 dict。
     """
     n = len(images)
     if n == 0:
@@ -340,7 +328,6 @@ def analyze_images_concurrently(images, model, max_ai_frames: int):
     status = st.empty()
     status.info(f"⚡ 正在对前 {use_n} 帧进行 AI 分析（共 {n} 帧），其余帧保留截图与色卡。")
 
-    # 先对需要分析的帧并发调用
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(use_n, 6)) as executor:
         future_to_index = {
             executor.submit(analyze_single_image, images[i], model, i + 1): i
@@ -367,7 +354,6 @@ def analyze_images_concurrently(images, model, max_ai_frames: int):
                     "midjourney_negative_prompt": "",
                 }
 
-    # 对未分析的帧填充占位
     for i in range(use_n, n):
         results[i] = {
             "index": i + 1,
@@ -394,9 +380,6 @@ def analyze_images_concurrently(images, model, max_ai_frames: int):
 # ========================
 
 def analyze_overall_video(frame_infos, model):
-    """
-    使用已有的帧级信息，生成整段视频的剧情大纲等。
-    """
     described = [
         info
         for info in frame_infos
@@ -440,13 +423,12 @@ def analyze_overall_video(frame_infos, model):
 从节奏快慢、镜头感、色彩气质（暖/冷/日常/梦幻）、情绪氛围等角度总结整体风格。
 
 【适合的话题标签】
-用 #标签 形式给出 5-10 个，适合抖音/小红书/视频号等平台，例如：
-#城市夜景 #治愈自拍 #氛围感美女
+用 #标签 形式给出 5-10 个，适合抖音/小红书/视频号等平台。
 
 【商业与合规风险】
 从“血腥/暴力/色情/政治/品牌商标”等维度，简单评估：
 整体风险级别：低 / 中 / 高
-并用 2-3 句话说明需要注意的点（例如：服装暴露程度、未成年人形象、是否有明显品牌 Logo 等）。
+并用 2-3 句话说明需要注意的点。
 
 请直接输出以上 4 个小节，不要添加额外说明。
 """
@@ -462,9 +444,6 @@ def analyze_overall_video(frame_infos, model):
 # ========================
 
 def generate_ad_script(frame_infos, model):
-    """
-    基于若干关键帧的分析，生成一条 10 秒左右的中文广告旁白脚本。
-    """
     described = [
         info
         for info in frame_infos
@@ -495,15 +474,13 @@ def generate_ad_script(frame_infos, model):
 
 要求：
 1. 旁白总时长控制在 8-12 秒左右（正常语速），文本 35-70 字即可。
-2. 风格与画面调性匹配（如果是氛围感自拍，就偏情绪/生活方式；如果是产品展示，就多讲卖点）。
-3. 用自然口语化中文，不要出现“画面中”“镜头里”这类字眼，直接对观众说话。
-4. 如果画面看起来像个人生活 vlog，可以弱化“购买号召”，更偏向情绪感染。
-5. 如果画面中有明显产品或品牌（如饮料、零食、护肤品等），可以适当加入温柔的“种草话术”。
+2. 风格与画面调性匹配。
+3. 用自然口语化中文，不要出现“画面中”“镜头里”字眼。
 
 请严格按照下面格式输出：
 
 【10秒广告旁白脚本】
-（在这里写完整的一段旁白，不要拆成多行，不要标注镜头编号）
+（在这里写完整的一段旁白）
 
 不要输出其他任何内容。
 """
@@ -523,8 +500,10 @@ with st.sidebar:
     api_key = st.text_input(
         "输入 Google API Key",
         type="password",
+        value=st.session_state["api_key"],
         help="粘贴你的 Gemini API Key（通常以 AIza 开头）",
     )
+    st.session_state["api_key"] = api_key
 
     st.markdown("---")
     max_ai_frames = st.slider(
@@ -569,7 +548,6 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
     if not api_key or model is None:
         st.error("请先在左侧输入有效的 Google API Key。")
     else:
-        # 1. 保存上传的视频到临时文件
         suffix = os.path.splitext(uploaded_file.name)[1] or ".mp4"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(uploaded_file.read())
@@ -578,7 +556,6 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
         st.info("⏳ 正在根据视频时长自动抽取关键帧...")
         images, duration = extract_keyframes_dynamic(tmp_path)
 
-        # 删除临时文件
         try:
             os.remove(tmp_path)
         except OSError:
@@ -588,10 +565,9 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
             st.error("❌ 无法从视频中读取帧，请检查视频文件是否损坏或格式异常。")
         else:
             st.success(
-                f"✅ 已成功抽取 {len(images)} 个关键帧（视频约 {duration:.1f} 秒，当前最多对 {max_ai_frames} 帧做 AI 分析）。"
+                f"✅ 已成功抽取 {len(images)} 个关键帧（视频约 {duration:.1f} 秒，本次最多对 {max_ai_frames} 帧做 AI 分析）。"
             )
 
-            # 记录每帧的主色调
             frame_palettes = []
             for img in images:
                 try:
@@ -600,24 +576,70 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
                     palette_colors = []
                 frame_palettes.append(palette_colors)
 
-            # 3. 调用 Gemini 做逐帧分析（结构化 JSON + MJ 提示词）
             with st.spinner("🧠 正在为关键帧生成结构化分析 + Midjourney 提示词..."):
                 frame_infos = analyze_images_concurrently(
                     images, model, max_ai_frames=max_ai_frames
                 )
 
-            # 4. 整体总结 & 广告文案
             with st.spinner("📚 正在生成整段视频的剧情大纲与话题标签..."):
                 overall = analyze_overall_video(frame_infos, model)
             with st.spinner("🎤 正在生成 10 秒广告旁白脚本..."):
                 ad_script = generate_ad_script(frame_infos, model)
 
-            # 5. Tabs 布局：像网站那样分区展示
-            tab_frames, tab_story, tab_json = st.tabs(
-                ["🎞 关键帧 & MJ 提示词", "📚 剧情总结 & 广告旁白", "📦 JSON 导出"]
+            # ==== 生成 export_data，并保存到 session 历史 ====
+            export_frames = []
+            for info, palette in zip(frame_infos, frame_palettes):
+                export_frames.append(
+                    {
+                        "index": info.get("index"),
+                        "scene_description_zh": info.get("scene_description_zh", ""),
+                        "tags_zh": info.get("tags_zh", []),
+                        "camera": info.get("camera", {}),
+                        "color_and_light_zh": info.get("color_and_light_zh", ""),
+                        "mood_zh": info.get("mood_zh", ""),
+                        "midjourney_prompt": info.get("midjourney_prompt", ""),
+                        "midjourney_negative_prompt": info.get(
+                            "midjourney_negative_prompt", ""
+                        ),
+                        "palette_rgb": [list(c) for c in (palette or [])],
+                        "palette_hex": [rgb_to_hex(c) for c in (palette or [])],
+                    }
+                )
+
+            export_data = {
+                "meta": {
+                    "model": GEMINI_MODEL_NAME,
+                    "frame_count": len(images),
+                    "max_ai_frames_this_run": max_ai_frames,
+                    "duration_sec_est": duration,
+                    "source_filename": uploaded_file.name,
+                },
+                "frames": export_frames,
+                "overall_analysis": overall,
+                "ad_script_10s": ad_script,
+            }
+
+            json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
+
+            # 保存到当前会话的历史记录
+            history = st.session_state["analysis_history"]
+            run_id = f"run_{len(history) + 1}"
+            history.append(
+                {
+                    "id": run_id,
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "meta": export_data["meta"],
+                    "data": export_data,
+                }
+            )
+            st.session_state["analysis_history"] = history
+
+            # ==== UI Tabs ====
+            tab_frames, tab_story, tab_json, tab_history = st.tabs(
+                ["🎞 关键帧 & MJ 提示词", "📚 剧情总结 & 广告旁白", "📦 JSON 导出（本次）", "🕘 历史记录（本会话）"]
             )
 
-            # --- Tab1：逐帧卡片布局 ---
+            # --- Tab1：逐帧卡片 ---
             with tab_frames:
                 st.markdown(
                     f"共抽取 **{len(images)}** 个关键帧，其中前 **{min(len(images), max_ai_frames)}** 帧做了 AI 分析和 Midjourney 提示词生成。"
@@ -649,7 +671,6 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
                                 st.caption(f"主色 HEX：{hex_list}")
 
                         with c2:
-                            # 用 JSON 拼出一个“8 行分镜分析”
                             cam = info.get("camera", {})
                             tags = info.get("tags_zh", [])
                             analysis_text = "\n".join(
@@ -695,48 +716,11 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
                 st.markdown("### 🎤 10 秒广告旁白脚本")
                 st.code(ad_script, language="markdown")
 
-            # --- Tab3：JSON 导出 ---
+            # --- Tab3：本次 JSON 导出 ---
             with tab_json:
-                st.markdown("### 📦 导出 JSON 分析结果")
-
-                export_frames = []
-                for info, palette in zip(frame_infos, frame_palettes):
-                    export_frames.append(
-                        {
-                            "index": info.get("index"),
-                            "scene_description_zh": info.get(
-                                "scene_description_zh", ""
-                            ),
-                            "tags_zh": info.get("tags_zh", []),
-                            "camera": info.get("camera", {}),
-                            "color_and_light_zh": info.get(
-                                "color_and_light_zh", ""
-                            ),
-                            "mood_zh": info.get("mood_zh", ""),
-                            "midjourney_prompt": info.get("midjourney_prompt", ""),
-                            "midjourney_negative_prompt": info.get(
-                                "midjourney_negative_prompt", ""
-                            ),
-                            "palette_rgb": [list(c) for c in (palette or [])],
-                            "palette_hex": [rgb_to_hex(c) for c in (palette or [])],
-                        }
-                    )
-
-                export_data = {
-                    "meta": {
-                        "model": GEMINI_MODEL_NAME,
-                        "frame_count": len(images),
-                        "max_ai_frames_this_run": max_ai_frames,
-                    },
-                    "frames": export_frames,
-                    "overall_analysis": overall,
-                    "ad_script_10s": ad_script,
-                }
-
-                json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
-
+                st.markdown("### 📦 下载本次分析的 JSON 文件")
                 st.download_button(
-                    label="⬇️ 下载 JSON 分析文件",
+                    label="⬇️ 下载本次 video_analysis.json",
                     data=json_str,
                     file_name="video_analysis.json",
                     mime="application/json",
@@ -747,3 +731,56 @@ if uploaded_file and st.button("🚀 一键解析整条视频"):
                         "\n...\n" if len(json_str) > 3000 else ""
                     )
                     st.code(preview, language="json")
+
+            # --- Tab4：历史记录（当前会话） ---
+            with tab_history:
+                st.markdown("### 🕘 当前会话历史记录（刷新页面会清空）")
+
+                history = st.session_state.get("analysis_history", [])
+                if not history:
+                    st.info("当前会话还没有任何历史记录。")
+                else:
+                    options = [
+                        f"{len(history) - i}. {h['created_at']} | {h['meta'].get('source_filename','')} | {h['meta'].get('frame_count',0)} 帧"
+                        for i, h in enumerate(reversed(history))
+                    ]
+                    # 为了让最近的一条在最上面，我们翻转一下索引
+                    idx_display = st.selectbox(
+                        "选择一条历史记录查看",
+                        options=list(range(len(history))),
+                        format_func=lambda i: options[i],
+                    )
+                    # 把 display 索引映射回真实索引（历史里最新在末尾）
+                    real_index = len(history) - 1 - idx_display
+                    selected = history[real_index]
+
+                    st.markdown(
+                        f"**ID：** `{selected['id']}`  \n"
+                        f"**时间：** {selected['created_at']}  \n"
+                        f"**源文件：** {selected['meta'].get('source_filename','')}  \n"
+                        f"**帧数：** {selected['meta'].get('frame_count',0)}  \n"
+                        f"**模型：** {selected['meta'].get('model','')}"
+                    )
+
+                    # 下载这条历史记录的 JSON
+                    hist_json = json.dumps(
+                        selected["data"], ensure_ascii=False, indent=2
+                    )
+                    st.download_button(
+                        label="⬇️ 下载该历史记录 JSON",
+                        data=hist_json,
+                        file_name=f"video_analysis_{selected['id']}.json",
+                        mime="application/json",
+                    )
+
+                    # 简单预览：前三帧的 MJ 提示词
+                    frames = selected["data"].get("frames", [])
+                    if frames:
+                        st.markdown("#### 部分帧预览（场景 + MJ 提示词）")
+                        for f in frames[:3]:
+                            st.markdown(f"**第 {f.get('index')} 帧：**")
+                            st.write(f.get("scene_description_zh", ""))
+                            mj = f.get("midjourney_prompt", "")
+                            if mj:
+                                st.code(mj, language="markdown")
+                            st.markdown("---")
