@@ -43,7 +43,7 @@ if "analysis_history" not in st.session_state:
 # ========================
 
 st.set_page_config(
-    page_title="AI 自动关键帧分镜 & Midjourney 提示词助手",
+    page_title="AI 自动关键帧分镜 & 视频提示词助手",
     page_icon="🎬",
     layout="wide",
 )
@@ -76,11 +76,11 @@ st.markdown(
         border: 1px solid rgba(148, 163, 184, 0.35);
     ">
       <h1 style="margin: 0 0 8px 0; color: #e5e7eb; font-size: 1.6rem;">
-        🎬 AI 自动关键帧分镜助手 Pro · Midjourney 提示词 + 时间区间 + 历史记录
+        🎬 AI 自动关键帧分镜助手 Pro · SORA/VEO 视频提示词 + 时间区间 + 历史记录
       </h1>
       <p style="margin: 0; color: #cbd5f5; font-size: 0.96rem;">
         上传视频或输入抖音/B站/TikTok/YouTube 链接，设置分析时间区间，自动抽取关键帧，生成
-        <b>结构化 JSON + Midjourney 提示词 + 分镜解读 + 剧情大纲 + 10 秒广告旁白 + 时间轴分镜脚本</b>，
+        <b>结构化 JSON + Midjourney 提示词 + SORA/VEO 英文视频提示词 + 分镜解读 + 剧情大纲 + 10 秒广告旁白 + 时间轴分镜脚本</b>，
         并在当前会话中保存多条分析记录，方便对比与下载。
       </p>
     </div>
@@ -274,41 +274,77 @@ def _extract_text_from_response(resp) -> str:
 
 
 # ========================
-# 单帧分析：结构化 JSON + MJ 提示词
+# 单帧分析：结构化 JSON + MJ 提示词 + 视频提示词
 # ========================
 
 def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
     """
-    输出一个结构化 dict，包含中文分镜信息 + Midjourney 提示词。
+    对单帧做全面分析：
+    - 中文分镜（景别/机位/光线/情绪/标签）
+    - 人物服饰/表情/动作/道具（characters）
+    - 场景细节 / 科技道具 / 动作细节
+    - Midjourney 提示词（可选）
+    - SORA/VEO 用英文视频提示词 video_prompt_en
     """
     try:
         prompt = f"""
-你现在是专业的电影分镜师 + 提示词工程师。
-请仔细分析给你的这一帧画面，并输出一个 JSON 对象，用于在 Midjourney 中复现该画面。
+你现在是电影导演 + 摄影指导 + 服化道总监 + 提示词工程师。
+请仔细分析给你的这一帧画面，并输出一个 JSON 对象，用于：
+1）人类导演阅读分镜
+2）Midjourney 生成分镜图
+3）SORA/VEO 等视频模型生成对应镜头
 
-必须使用下面这些 key（英文），value 多为中文说明，Midjourney 相关字段为英文：
+必须使用下面这些 key（英文），value 大部分为中文说明，英文提示词字段为英文：
 
 {{
   "index": 整数，当前帧序号，固定为 {index},
-  "scene_description_zh": "一句完整的中文句子，描述画面中是谁在什么场景下做什么",
+
+  "scene_description_zh": "一句完整的中文句子，概括画面中是谁在什么场景下做什么",
+
   "tags_zh": ["#短中文标签1", "#标签2", "..."],
+
   "camera": {{
-    "shot_type_zh": "景别，例如：远景 / 全景 / 中景 / 近景 / 特写",
-    "angle_zh": "拍摄角度，例如：俯拍 / 仰拍 / 平视 / 上帝视角",
-    "movement_zh": "运镜方式，例如：静止镜头 / 轻微推镜 / 跟拍 等",
-    "composition_zh": "构图方式，例如：三分法构图 / 中心构图 / 对称构图 / 前景-主体-背景 等"
+    "shot_type_zh": "景别，例如：远景 / 全景 / 中景 / 中近景 / 近景 / 特写",
+    "shot_type": "英文景别，例如：wide shot, full shot, medium shot, medium close-up, close-up",
+    "angle_zh": "拍摄角度，例如：俯拍 / 仰拍 / 平视 / 上帝视角 / 侧拍等",
+    "angle": "英文角度描述，例如：eye-level, low angle, high angle, top-down",
+    "movement_zh": "运镜方式，例如：静止镜头 / 缓慢推近 / 手持跟拍 / 横移 / 甩镜 等",
+    "movement": "英文运镜描述，例如：slow dolly-in, handheld tracking from left to right",
+    "composition_zh": "构图方式，例如：三分法构图 / 中心构图 / 对称构图 / 前景-主体-背景 等",
+    "composition": "英文构图描述，例如：rule-of-thirds, subject on right third, strong foreground elements"
   }},
-  "color_and_light_zh": "用一两句中文描述画面的色调和光线，例如：整体偏暖，高调柔和逆光，粉色和米白为主色",
-  "mood_zh": "用中文概括情绪氛围，例如：亲切、甜美、带货分享氛围",
-  "midjourney_prompt": "一行英文 Midjourney v6 提示词，用逗号分隔短语，尽量精确描述人物外观、姿态、场景、道具、光线、色调、构图和氛围，适合 9:16 竖版，结尾加 --ar 9:16 --v 6.0 --style raw",
-  "midjourney_negative_prompt": "一行英文负面提示词，例如：text, subtitle, watermark, extra fingers, deformed hands, distorted face, low resolution, blurry, cartoon, anime, painting"
+
+  "color_and_light_zh": "用一两句中文描述画面的色调和光线（色温/对比/主光源方向等）",
+  "mood_zh": "用中文概括情绪氛围（紧张/温暖/梦幻/冷峻/商业感等）",
+
+  "characters": [
+    {{
+      "role_zh": "人物身份，例如：女主 / 男主 / 科学家 / 侦探 / 厨师",
+      "gender_zh": "性别，例如：女性 / 男性 / 不明显",
+      "age_look_zh": "年龄观感，例如：20多岁 / 中年",
+      "body_type_zh": "体型，例如：偏瘦 / 健壮",
+      "clothing_zh": "服装风格与颜色，例如：白色科技感紧身衣，带蓝色发光纹路",
+      "hair_zh": '发型与发色，例如："短发，银色挑染"',
+      "expression_zh": "面部表情，例如：专注、愤怒、惊讶、轻松微笑",
+      "pose_body_zh": "身体姿态，例如：前倾操作控制台 / 半蹲准备起跳",
+      "props_zh": "人物手上或身上明显可见的道具，例如：手枪、光剑、平底锅、平板电脑"
+    }}
+  ],
+
+  "environment_detail_zh": "中文详细描述场景环境（空间类型/前景/背景/建筑或室内结构等）",
+  "props_and_tech_detail_zh": "中文描述道具与科技元素（武器、载具、机甲、全息屏幕、霓虹招牌等）",
+  "motion_detail_zh": "中文描述此时画面中可推断的动作趋势（人物/镜头/环境的动势，例如：主角向左冲刺，镜头反向跟拍）",
+
+  "midjourney_prompt": "一行英文 Midjourney v6 提示词，适合生成这一帧的静态分镜图",
+  "midjourney_negative_prompt": "一行英文负面提示词，例如：text, subtitle, watermark, extra fingers, deformed hands, distorted face, low resolution, blurry, cartoon, anime, painting",
+
+  "video_prompt_en": "一段英文视频提示词，适合给 SORA/VEO 使用。用 3-5 句描述：人物外观、当前动作、运镜方式、环境、光线与氛围，并在结尾加：'4 second shot, vertical 9:16, 24fps, cinematic, highly detailed.'"
 }}
 
 要求：
-1. 只输出 JSON，不要任何解释或额外文字。
-2. 所有字符串使用双引号，不要使用单引号。
+1. 只输出一个 JSON 对象，不要任何解释或额外文字。
+2. 所有字符串必须使用双引号，不要使用单引号。
 3. JSON 中不能有注释，不能有多余的逗号。
-4. midjourney_prompt 必须是英文，适合直接粘贴给 Midjourney v6。
 """
         resp = model.generate_content([prompt, img])
         text = _extract_text_from_response(resp)
@@ -329,13 +365,23 @@ def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
         info.setdefault("camera", {})
         info.setdefault("color_and_light_zh", "")
         info.setdefault("mood_zh", "")
+        info.setdefault("characters", [])
+        info.setdefault("environment_detail_zh", "")
+        info.setdefault("props_and_tech_detail_zh", "")
+        info.setdefault("motion_detail_zh", "")
         info.setdefault("midjourney_prompt", "")
         info.setdefault("midjourney_negative_prompt", "")
+        info.setdefault("video_prompt_en", "")
+
         cam = info["camera"]
         cam.setdefault("shot_type_zh", "")
+        cam.setdefault("shot_type", "")
         cam.setdefault("angle_zh", "")
+        cam.setdefault("angle", "")
         cam.setdefault("movement_zh", "")
+        cam.setdefault("movement", "")
         cam.setdefault("composition_zh", "")
+        cam.setdefault("composition", "")
 
         return info
 
@@ -346,14 +392,23 @@ def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
             "tags_zh": [],
             "camera": {
                 "shot_type_zh": "",
+                "shot_type": "",
                 "angle_zh": "",
+                "angle": "",
                 "movement_zh": "",
+                "movement": "",
                 "composition_zh": "",
+                "composition": "",
             },
             "color_and_light_zh": "",
             "mood_zh": "",
+            "characters": [],
+            "environment_detail_zh": "",
+            "props_and_tech_detail_zh": "",
+            "motion_detail_zh": "",
             "midjourney_prompt": "",
             "midjourney_negative_prompt": "",
+            "video_prompt_en": "",
         }
 
 
@@ -390,14 +445,23 @@ def analyze_images_concurrently(
                     "tags_zh": [],
                     "camera": {
                         "shot_type_zh": "",
+                        "shot_type": "",
                         "angle_zh": "",
+                        "angle": "",
                         "movement_zh": "",
+                        "movement": "",
                         "composition_zh": "",
+                        "composition": "",
                     },
                     "color_and_light_zh": "",
                     "mood_zh": "",
+                    "characters": [],
+                    "environment_detail_zh": "",
+                    "props_and_tech_detail_zh": "",
+                    "motion_detail_zh": "",
                     "midjourney_prompt": "",
                     "midjourney_negative_prompt": "",
+                    "video_prompt_en": "",
                 }
 
     for i in range(use_n, n):
@@ -407,14 +471,23 @@ def analyze_images_concurrently(
             "tags_zh": [],
             "camera": {
                 "shot_type_zh": "",
+                "shot_type": "",
                 "angle_zh": "",
+                "angle": "",
                 "movement_zh": "",
+                "movement": "",
                 "composition_zh": "",
+                "composition": "",
             },
             "color_and_light_zh": "",
             "mood_zh": "",
+            "characters": [],
+            "environment_detail_zh": "",
+            "props_and_tech_detail_zh": "",
+            "motion_detail_zh": "",
             "midjourney_prompt": "",
             "midjourney_negative_prompt": "",
+            "video_prompt_en": "",
         }
 
     status.empty()
@@ -633,8 +706,6 @@ def generate_timeline_shotlist(
 2. 各时间段区间必须连续且不重叠，最后一段的结束时间应接近 {total_len:.1f} 秒。
 3. 每段必须包含四行，以“画面：”“机位与运动：”“光线与氛围：”“声音与字幕：”为前缀，行与行之间不要加空行。
 4. 使用简洁专业的中文，不要解释模型过程，也不要添加额外标题或总结文字，只输出分镜段落列表。
-
-现在请直接输出时间轴分镜脚本。
 """
     try:
         resp = model.generate_content(prompt)
@@ -803,7 +874,7 @@ if st.button("🚀 一键解析整条视频"):
                     )
 
                 # 4. 帧级分析
-                with st.spinner("🧠 正在为关键帧生成结构化分析 + Midjourney 提示词..."):
+                with st.spinner("🧠 正在为关键帧生成结构化分析 + MJ 提示词 + 视频提示词..."):
                     frame_infos = analyze_images_concurrently(
                         images, model, max_ai_frames=max_ai_frames_safe
                     )
@@ -829,10 +900,13 @@ if st.button("🚀 一键解析整条视频"):
                             "camera": info.get("camera", {}),
                             "color_and_light_zh": info.get("color_and_light_zh", ""),
                             "mood_zh": info.get("mood_zh", ""),
+                            "characters": info.get("characters", []),
+                            "environment_detail_zh": info.get("environment_detail_zh", ""),
+                            "props_and_tech_detail_zh": info.get("props_and_tech_detail_zh", ""),
+                            "motion_detail_zh": info.get("motion_detail_zh", ""),
                             "midjourney_prompt": info.get("midjourney_prompt", ""),
-                            "midjourney_negative_prompt": info.get(
-                                "midjourney_negative_prompt", ""
-                            ),
+                            "midjourney_negative_prompt": info.get("midjourney_negative_prompt", ""),
+                            "video_prompt_en": info.get("video_prompt_en", ""),
                             "palette_rgb": [list(c) for c in (palette or [])],
                             "palette_hex": [rgb_to_hex(c) for c in (palette or [])],
                         }
@@ -872,7 +946,7 @@ if st.button("🚀 一键解析整条视频"):
                 # 7. Tabs 展示
                 tab_frames, tab_story, tab_json, tab_history = st.tabs(
                     [
-                        "🎞 关键帧 & MJ 提示词",
+                        "🎞 关键帧 & 提示词",
                         "📚 剧情总结 & 广告旁白 & 时间轴分镜",
                         "📦 JSON 导出（本次）",
                         "🕘 历史记录（本会话）",
@@ -882,7 +956,7 @@ if st.button("🚀 一键解析整条视频"):
                 # --- Tab1：逐帧卡片 ---
                 with tab_frames:
                     st.markdown(
-                        f"共抽取 **{len(images)}** 个关键帧，其中前 **{min(len(images), max_ai_frames_safe)}** 帧做了 AI 分析和 Midjourney 提示词生成。"
+                        f"共抽取 **{len(images)}** 个关键帧，其中前 **{min(len(images), max_ai_frames_safe)}** 帧做了 AI 分析。"
                     )
                     st.markdown("---")
 
@@ -915,18 +989,17 @@ if st.button("🚀 一键解析整条视频"):
                             with c2:
                                 cam = info.get("camera", {})
                                 tags = info.get("tags_zh", [])
-                                analysis_text = "\n".join(
-                                    [
-                                        f"【景别】{cam.get('shot_type_zh', '')}",
-                                        f"【运镜】{cam.get('movement_zh', '')}",
-                                        f"【拍摄角度】{cam.get('angle_zh', '')}",
-                                        f"【构图】{cam.get('composition_zh', '')}",
-                                        f"【色彩与光影】{info.get('color_and_light_zh', '')}",
-                                        f"【画面内容】{info.get('scene_description_zh', '')}",
-                                        f"【情绪氛围】{info.get('mood_zh', '')}",
-                                        f"【关键词标签】{' '.join(tags)}",
-                                    ]
-                                ).strip()
+                                analysis_lines = [
+                                    f"【景别】{cam.get('shot_type_zh', '')}",
+                                    f"【运镜】{cam.get('movement_zh', '')}",
+                                    f"【拍摄角度】{cam.get('angle_zh', '')}",
+                                    f"【构图】{cam.get('composition_zh', '')}",
+                                    f"【色彩与光影】{info.get('color_and_light_zh', '')}",
+                                    f"【画面内容】{info.get('scene_description_zh', '')}",
+                                    f"【情绪氛围】{info.get('mood_zh', '')}",
+                                    f"【关键词标签】{' '.join(tags)}",
+                                ]
+                                analysis_text = "\n".join(analysis_lines).strip()
 
                                 st.markdown("**分镜分析（可复制）：**")
                                 st.code(
@@ -935,16 +1008,16 @@ if st.button("🚀 一键解析整条视频"):
                                     language="markdown",
                                 )
 
-                                st.markdown("**Midjourney 提示词（可复制）：**")
+                                st.markdown("**SORA / VEO 视频提示词（英文，可复制）：**")
                                 st.code(
-                                    info.get("midjourney_prompt")
-                                    or "（暂无 Midjourney 提示词，可能未做 AI 分析）",
+                                    info.get("video_prompt_en") or "（暂无视频提示词）",
                                     language="markdown",
                                 )
 
-                                st.markdown("**Midjourney 负面提示词（可选）：**")
+                                st.markdown("**Midjourney 静帧提示词（可选）：**")
                                 st.code(
-                                    info.get("midjourney_negative_prompt") or "",
+                                    info.get("midjourney_prompt")
+                                    or "（暂无 Midjourney 提示词）",
                                     language="markdown",
                                 )
 
@@ -1020,13 +1093,13 @@ if st.button("🚀 一键解析整条视频"):
 
                         frames = selected["data"].get("frames", [])
                         if frames:
-                            st.markdown("#### 部分帧预览（场景 + MJ 提示词）")
+                            st.markdown("#### 部分帧预览（中文场景 + 英文视频提示词）")
                             for f in frames[:3]:
                                 st.markdown(f"**第 {f.get('index')} 帧：**")
                                 st.write(f.get("scene_description_zh", ""))
-                                mj = f.get("midjourney_prompt", "")
-                                if mj:
-                                    st.code(mj, language="markdown")
+                                vp = f.get("video_prompt_en", "")
+                                if vp:
+                                    st.code(vp, language="markdown")
                                 st.markdown("---")
 
         except Exception as e:
