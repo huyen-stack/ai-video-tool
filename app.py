@@ -17,6 +17,9 @@ from typing import Optional, Tuple, List, Dict, Any
 
 GEMINI_MODEL_NAME = "gemini-flash-latest"  # 可换成 gemini-2.5-flash-lite 等
 
+# 免费版典型速率：每分钟 10 次 generateContent
+FREE_TIER_RPM_LIMIT = 10
+
 DISPLAY_IMAGE_WIDTH = 320
 PALETTE_WIDTH = 320
 PALETTE_HEIGHT = 26
@@ -276,17 +279,7 @@ def _extract_text_from_response(resp) -> str:
 
 def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
     """
-    输出一个结构化 dict：
-    {
-      "index": index,
-      "scene_description_zh": ...,
-      "tags_zh": [...],
-      "camera": {...},
-      "color_and_light_zh": ...,
-      "mood_zh": ...,
-      "midjourney_prompt": ...,
-      "midjourney_negative_prompt": ...
-    }
+    输出一个结构化 dict，包含中文分镜信息 + Midjourney 提示词。
     """
     try:
         prompt = f"""
@@ -463,9 +456,9 @@ def analyze_overall_video(frame_infos: List[Dict[str, Any]], model) -> str:
 你现在是资深视频导演 + 剪辑师 + 短视频运营专家 + 内容合规审核员。
 下面是从一段视频中抽取的若干关键帧的详细说明，请你基于这些说明，对整段视频做整体分析。
 
-=== 关键帧说明开始 ===
+=== 帧级说明开始 ===
 {joined}
-=== 关键帧说明结束 ===
+=== 帧级说明结束 ===
 
 请严格按下面结构输出中文分析：
 
@@ -489,7 +482,10 @@ def analyze_overall_video(frame_infos: List[Dict[str, Any]], model) -> str:
         resp = model.generate_content(prompt)
         return _extract_text_from_response(resp)
     except Exception as e:
-        return f"整体分析失败：{e}"
+        msg = str(e)
+        if "quota" in msg or "You exceeded your current quota" in msg:
+            return "整体分析失败：当前 Gemini 免费额度的每分钟调用次数已用完，请稍等几十秒或减少本次分析帧数后重试。"
+        return f"整体分析失败：{msg}"
 
 
 # ========================
@@ -541,11 +537,14 @@ def generate_ad_script(frame_infos: List[Dict[str, Any]], model) -> str:
         resp = model.generate_content(prompt)
         return _extract_text_from_response(resp)
     except Exception as e:
-        return f"广告文案生成失败：{e}"
+        msg = str(e)
+        if "quota" in msg or "You exceeded your current quota" in msg:
+            return "广告文案生成失败：当前 Gemini 免费额度的每分钟调用次数已用完，请稍等几十秒或减少本次分析帧数后重试。"
+        return f"广告文案生成失败：{msg}"
 
 
 # ========================
-# 时间轴分镜脚本生成
+# 时间轴分镜脚本生成（加强版）
 # ========================
 
 def generate_timeline_shotlist(
@@ -554,10 +553,11 @@ def generate_timeline_shotlist(
     model,
 ) -> str:
     """
-    生成类似：
-    【0-1.5 秒】
-    女孩走在清晨薄雾的森林里，阳光从树间照进来。电影级画面。
-    机位：50mm，f1.8，慢速推镜。
+    生成更详细的时间轴分镜脚本，每段包含：
+    - 画面：2~3 句，主体/动作/前景/背景
+    - 机位与运动：景别+焦段/视角+运镜
+    - 光线与氛围：色调/光源/情绪
+    - 声音与字幕：BGM/环境声/屏幕字
     """
     described = [
         info
@@ -596,21 +596,43 @@ def generate_timeline_shotlist(
 {overview}
 === 帧级概览结束 ===
 
-请严格按照下面格式输出分镜（示例）：
+请严格按照下面格式输出每一段分镜（注意字段）：
+
+【起始秒-结束秒 秒】
+画面：用 2~3 句完整中文描述这一段的画面内容。写清楚：
+- 主体是谁，在做什么（具体动作：例如“切菜”“端盘转身”“抬手撒料”）
+- 前景 / 中景 / 背景里有哪些物体或环境元素
+- 如有镜头运动或人物走位，简单写出镜头移动方向或人物行进方向。
+
+机位与运动：用一句话写清景别、焦段/镜头类型（如“特写 / 中近景 / 90mm 微距”）、拍摄角度（平视/俯拍/仰拍等），以及运镜方式（慢速推近、跟随横移、快速摇镜、静止镜头等）。
+
+光线与氛围：用 1 句描述画面的色调和光线来源，例如：
+“暖色调，高调柔和顶灯+橱柜下补光，突出食材油亮质感，整体营造温馨家庭厨房氛围。”
+
+声音与字幕：说明这一段大概的声音设计和屏幕字，可以包括：
+- 现场声（刀砧声、翻炒声、油啵啵声、人声等）
+- BGM 氛围（轻快/稳重/治愈等）
+- 屏幕字幕内容（例如：“小火慢炖 3 分钟更入味”“0 添加防腐剂”等）
+
+输出示例（仅示意）：
 
 【0-1.5 秒】
-女孩走在清晨薄雾的森林里，阳光从树间照进来。电影级画面。
-机位：50mm，f1.8，慢速推镜。
+画面：女孩走在清晨薄雾的森林小路上，背着小背包，远处树干和枝叶被晨光勾出轮廓。镜头缓慢靠近，背景中隐约可见散落的光斑。
+机位与运动：中景，50mm，平视，缓慢推镜。
+光线与氛围：冷偏暖的晨光，柔和逆光勾边，空气中有轻微雾气，整体偏梦幻、安静的氛围。
+声音与字幕：轻柔钢琴 BGM，远处有微弱鸟鸣；屏幕字幕：“清晨 6:30，一天的故事刚刚开始。”
 
 【1.5-3 秒】
-特写镜头：她的手轻轻划过带露水的叶子，微距细节清晰可见。
-机位：90mm 微距，轻微推近。
+画面：特写她的手指轻轻划过带露水的叶片，水珠被擦落，叶片细节清晰可见，背景虚化成一片绿色光斑。
+机位与运动：特写，90mm 微距，平视，轻微推近。
+光线与氛围：自然光透过树叶形成斑驳高光，聚焦在手指和水珠上，画面清新、干净。
+声音与字幕：环境声以鸟鸣和脚步声为主，BGM 继续；可出现一句小字幕：“去感受每一个微小的瞬间”。
 
-具体要求：
+要求：
 1. 时间从 0 秒开始，单位为“秒”，用阿拉伯数字，区间用“-”连接，并在末尾写“秒”，如【0-1.5 秒】。
 2. 各时间段区间必须连续且不重叠，最后一段的结束时间应接近 {total_len:.1f} 秒。
-3. 每段至少两行：第一行描述画面和情绪，第二行以“机位：”开头，简要写焦段/视角/运镜（用中文）。
-4. 使用简洁中文，不要解释模型过程，也不要添加额外标题或总结文字，只输出分镜列表。
+3. 每段必须包含四行，以“画面：”“机位与运动：”“光线与氛围：”“声音与字幕：”为前缀，行与行之间不要加空行。
+4. 使用简洁专业的中文，不要解释模型过程，也不要添加额外标题或总结文字，只输出分镜段落列表。
 
 现在请直接输出时间轴分镜脚本。
 """
@@ -618,7 +640,10 @@ def generate_timeline_shotlist(
         resp = model.generate_content(prompt)
         return _extract_text_from_response(resp)
     except Exception as e:
-        return f"时间轴分镜脚本生成失败：{e}"
+        msg = str(e)
+        if "quota" in msg or "You exceeded your current quota" in msg:
+            return "时间轴分镜脚本生成失败：当前 Gemini 免费额度的每分钟调用次数已用完，请稍等几十秒或减少本次分析帧数后重试。"
+        return f"时间轴分镜脚本生成失败：{msg}"
 
 
 # ========================
@@ -732,264 +757,277 @@ if st.button("🚀 一键解析整条视频"):
 
             if not tmp_path:
                 st.error("视频路径异常，请重试。")
-                st.stop()
+            else:
+                # 2. 抽帧（带时间区间）
+                st.info("⏳ 正在根据指定时间区间自动抽取关键帧...")
+                images, duration, used_range = extract_keyframes_dynamic(
+                    tmp_path,
+                    start_sec=start_sec,
+                    end_sec=end_sec if end_sec > 0 else None,
+                )
+                start_used, end_used = used_range
 
-            # 2. 抽帧（带时间区间）
-            st.info("⏳ 正在根据指定时间区间自动抽取关键帧...")
-            images, duration, used_range = extract_keyframes_dynamic(
-                tmp_path,
-                start_sec=start_sec,
-                end_sec=end_sec if end_sec > 0 else None,
-            )
-            start_used, end_used = used_range
-
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-
-            if not images:
-                st.error("❌ 无法从视频中读取帧，请检查视频是否损坏或格式异常。")
-                st.stop()
-
-            st.success(
-                f"✅ 已成功抽取 {len(images)} 个关键帧（视频总长约 {duration:.1f} 秒，"
-                f"本次分析区间：{start_used:.1f}–{end_used:.1f} 秒，最多对 {max_ai_frames} 帧做 AI 分析）。"
-            )
-
-            # 3. 主色调
-            frame_palettes: List[List[Tuple[int, int, int]]] = []
-            for img in images:
                 try:
-                    palette_colors = get_color_palette(img, num_colors=5)
-                except Exception:
-                    palette_colors = []
-                frame_palettes.append(palette_colors)
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
-            # 4. 帧级分析
-            with st.spinner("🧠 正在为关键帧生成结构化分析 + Midjourney 提示词..."):
-                frame_infos = analyze_images_concurrently(
-                    images, model, max_ai_frames=max_ai_frames
+                if not images:
+                    st.error("❌ 无法从视频中读取帧，请检查视频是否损坏或格式异常。")
+                    st.stop()
+
+                st.success(
+                    f"✅ 已成功抽取 {len(images)} 个关键帧（视频总长约 {duration:.1f} 秒，"
+                    f"本次分析区间：{start_used:.1f}–{end_used:.1f} 秒）。"
                 )
 
-            # 5. 整体分析 + 广告文案 + 时间轴分镜
-            with st.spinner("📚 正在生成整段视频的剧情大纲与话题标签..."):
-                overall = analyze_overall_video(frame_infos, model)
-            with st.spinner("🎤 正在生成 10 秒广告旁白脚本..."):
-                ad_script = generate_ad_script(frame_infos, model)
-            with st.spinner("🎬 正在生成时间轴分镜脚本..."):
-                timeline_shotlist = generate_timeline_shotlist(
-                    frame_infos, used_range=used_range, model=model
-                )
+                # 3. 主色调
+                frame_palettes: List[List[Tuple[int, int, int]]] = []
+                for img in images:
+                    try:
+                        palette_colors = get_color_palette(img, num_colors=5)
+                    except Exception:
+                        palette_colors = []
+                    frame_palettes.append(palette_colors)
 
-            # 6. 组装 export_data + 写入历史记录
-            export_frames = []
-            for info, palette in zip(frame_infos, frame_palettes):
-                export_frames.append(
+                # ⭐ 控制本次 AI 调用总数不超过免费 10 次
+                overhead_calls = 3  # 整体 + 广告文案 + 时间轴分镜
+                max_ai_frames_safe = max(
+                    1,
+                    min(max_ai_frames, FREE_TIER_RPM_LIMIT - overhead_calls),
+                )
+                if max_ai_frames_safe < max_ai_frames:
+                    st.info(
+                        f"为避免触发免费额度限制，本次只对 **前 {max_ai_frames_safe} 帧** 做 AI 分析 "
+                        f"（侧边栏设置为 {max_ai_frames} 帧）。"
+                    )
+
+                # 4. 帧级分析
+                with st.spinner("🧠 正在为关键帧生成结构化分析 + Midjourney 提示词..."):
+                    frame_infos = analyze_images_concurrently(
+                        images, model, max_ai_frames=max_ai_frames_safe
+                    )
+
+                # 5. 整体分析 + 广告文案 + 时间轴分镜
+                with st.spinner("📚 正在生成整段视频的剧情大纲与话题标签..."):
+                    overall = analyze_overall_video(frame_infos, model)
+                with st.spinner("🎤 正在生成 10 秒广告旁白脚本..."):
+                    ad_script = generate_ad_script(frame_infos, model)
+                with st.spinner("🎬 正在生成时间轴分镜脚本..."):
+                    timeline_shotlist = generate_timeline_shotlist(
+                        frame_infos, used_range=used_range, model=model
+                    )
+
+                # 6. 组装 export_data + 写入历史记录
+                export_frames = []
+                for info, palette in zip(frame_infos, frame_palettes):
+                    export_frames.append(
+                        {
+                            "index": info.get("index"),
+                            "scene_description_zh": info.get("scene_description_zh", ""),
+                            "tags_zh": info.get("tags_zh", []),
+                            "camera": info.get("camera", {}),
+                            "color_and_light_zh": info.get("color_and_light_zh", ""),
+                            "mood_zh": info.get("mood_zh", ""),
+                            "midjourney_prompt": info.get("midjourney_prompt", ""),
+                            "midjourney_negative_prompt": info.get(
+                                "midjourney_negative_prompt", ""
+                            ),
+                            "palette_rgb": [list(c) for c in (palette or [])],
+                            "palette_hex": [rgb_to_hex(c) for c in (palette or [])],
+                        }
+                    )
+
+                export_data = {
+                    "meta": {
+                        "model": GEMINI_MODEL_NAME,
+                        "frame_count": len(images),
+                        "max_ai_frames_this_run": max_ai_frames_safe,
+                        "duration_sec_est": duration,
+                        "start_sec_used": start_used,
+                        "end_sec_used": end_used,
+                        "source_type": source_type,
+                        "source_label": source_label,
+                    },
+                    "frames": export_frames,
+                    "overall_analysis": overall,
+                    "ad_script_10s": ad_script,
+                    "timeline_shotlist_zh": timeline_shotlist,
+                }
+
+                json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
+
+                history = st.session_state["analysis_history"]
+                run_id = f"run_{len(history) + 1}"
+                history.append(
                     {
-                        "index": info.get("index"),
-                        "scene_description_zh": info.get("scene_description_zh", ""),
-                        "tags_zh": info.get("tags_zh", []),
-                        "camera": info.get("camera", {}),
-                        "color_and_light_zh": info.get("color_and_light_zh", ""),
-                        "mood_zh": info.get("mood_zh", ""),
-                        "midjourney_prompt": info.get("midjourney_prompt", ""),
-                        "midjourney_negative_prompt": info.get(
-                            "midjourney_negative_prompt", ""
-                        ),
-                        "palette_rgb": [list(c) for c in (palette or [])],
-                        "palette_hex": [rgb_to_hex(c) for c in (palette or [])],
+                        "id": run_id,
+                        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "meta": export_data["meta"],
+                        "data": export_data,
                     }
                 )
+                st.session_state["analysis_history"] = history
 
-            export_data = {
-                "meta": {
-                    "model": GEMINI_MODEL_NAME,
-                    "frame_count": len(images),
-                    "max_ai_frames_this_run": max_ai_frames,
-                    "duration_sec_est": duration,
-                    "start_sec_used": start_used,
-                    "end_sec_used": end_used,
-                    "source_type": source_type,
-                    "source_label": source_label,
-                },
-                "frames": export_frames,
-                "overall_analysis": overall,
-                "ad_script_10s": ad_script,
-                "timeline_shotlist_zh": timeline_shotlist,
-            }
-
-            json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
-
-            history = st.session_state["analysis_history"]
-            run_id = f"run_{len(history) + 1}"
-            history.append(
-                {
-                    "id": run_id,
-                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "meta": export_data["meta"],
-                    "data": export_data,
-                }
-            )
-            st.session_state["analysis_history"] = history
-
-            # 7. Tabs 展示
-            tab_frames, tab_story, tab_json, tab_history = st.tabs(
-                [
-                    "🎞 关键帧 & MJ 提示词",
-                    "📚 剧情总结 & 广告旁白 & 时间轴分镜",
-                    "📦 JSON 导出（本次）",
-                    "🕘 历史记录（本会话）",
-                ]
-            )
-
-            # --- Tab1：逐帧卡片 ---
-            with tab_frames:
-                st.markdown(
-                    f"共抽取 **{len(images)}** 个关键帧，其中前 **{min(len(images), max_ai_frames)}** 帧做了 AI 分析和 Midjourney 提示词生成。"
-                )
-                st.markdown("---")
-
-                for i, (img, info, palette) in enumerate(
-                    zip(images, frame_infos, frame_palettes)
-                ):
-                    with st.container():
-                        st.markdown(f"### 📘 关键帧 {i + 1}")
-
-                        c1, c2 = st.columns([1.2, 2])
-
-                        with c1:
-                            st.image(
-                                img,
-                                caption=f"第 {i + 1} 帧画面",
-                                width=DISPLAY_IMAGE_WIDTH,
-                            )
-                            palette_img = make_palette_image(palette)
-                            st.image(
-                                palette_img,
-                                caption="主色调色卡",
-                                width=PALETTE_WIDTH,
-                            )
-                            if palette:
-                                hex_list = ", ".join(rgb_to_hex(c) for c in palette)
-                                st.caption(f"主色 HEX：{hex_list}")
-
-                        with c2:
-                            cam = info.get("camera", {})
-                            tags = info.get("tags_zh", [])
-                            analysis_text = "\n".join(
-                                [
-                                    f"【景别】{cam.get('shot_type_zh', '')}",
-                                    f"【运镜】{cam.get('movement_zh', '')}",
-                                    f"【拍摄角度】{cam.get('angle_zh', '')}",
-                                    f"【构图】{cam.get('composition_zh', '')}",
-                                    f"【色彩与光影】{info.get('color_and_light_zh', '')}",
-                                    f"【画面内容】{info.get('scene_description_zh', '')}",
-                                    f"【情绪氛围】{info.get('mood_zh', '')}",
-                                    f"【关键词标签】{' '.join(tags)}",
-                                ]
-                            ).strip()
-
-                            st.markdown("**分镜分析（可复制）：**")
-                            st.code(
-                                analysis_text
-                                or "（暂无分镜分析，可能未做 AI 分析）",
-                                language="markdown",
-                            )
-
-                            st.markdown("**Midjourney 提示词（可复制）：**")
-                            st.code(
-                                info.get("midjourney_prompt")
-                                or "（暂无 Midjourney 提示词，可能未做 AI 分析）",
-                                language="markdown",
-                            )
-
-                            st.markdown("**Midjourney 负面提示词（可选）：**")
-                            st.code(
-                                info.get("midjourney_negative_prompt") or "",
-                                language="markdown",
-                            )
-
-                        st.markdown("---")
-
-            # --- Tab2：整体分析 + 广告文案 + 时间轴分镜 ---
-            with tab_story:
-                st.markdown("### 📚 整体剧情与视听风格总结")
-                st.code(overall, language="markdown")
-
-                st.markdown("### 🎤 10 秒广告旁白脚本")
-                st.code(ad_script, language="markdown")
-
-                st.markdown("### 🎬 时间轴分镜脚本（可复制）")
-                st.code(timeline_shotlist, language="markdown")
-
-            # --- Tab3：本次 JSON 导出 ---
-            with tab_json:
-                st.markdown("### 📦 下载本次分析的 JSON 文件")
-                st.download_button(
-                    label="⬇️ 下载本次 video_analysis.json",
-                    data=json_str,
-                    file_name="video_analysis.json",
-                    mime="application/json",
-                )
-
-                with st.expander("🔍 预览部分 JSON 内容"):
-                    preview = json_str[:3000] + (
-                        "\n...\n" if len(json_str) > 3000 else ""
-                    )
-                    st.code(preview, language="json")
-
-            # --- Tab4：历史记录（当前会话） ---
-            with tab_history:
-                st.markdown("### 🕘 当前会话历史记录（刷新页面会清空）")
-
-                history = st.session_state.get("analysis_history", [])
-                if not history:
-                    st.info("当前会话还没有任何历史记录。")
-                else:
-                    options = [
-                        f"{len(history) - i}. {h['created_at']} | {h['meta'].get('source_label','')} | "
-                        f"{h['meta'].get('frame_count',0)} 帧 | 区间 {h['meta'].get('start_sec_used',0):.1f}-{h['meta'].get('end_sec_used',0):.1f}s"
-                        for i, h in enumerate(reversed(history))
+                # 7. Tabs 展示
+                tab_frames, tab_story, tab_json, tab_history = st.tabs(
+                    [
+                        "🎞 关键帧 & MJ 提示词",
+                        "📚 剧情总结 & 广告旁白 & 时间轴分镜",
+                        "📦 JSON 导出（本次）",
+                        "🕘 历史记录（本会话）",
                     ]
-                    idx_display = st.selectbox(
-                        "选择一条历史记录查看",
-                        options=list(range(len(history))),
-                        format_func=lambda i: options[i],
-                    )
-                    real_index = len(history) - 1 - idx_display
-                    selected = history[real_index]
+                )
 
+                # --- Tab1：逐帧卡片 ---
+                with tab_frames:
                     st.markdown(
-                        f"**ID：** `{selected['id']}`  \n"
-                        f"**时间：** {selected['created_at']}  \n"
-                        f"**来源类型：** {selected['meta'].get('source_type','')}  \n"
-                        f"**来源标识：** {selected['meta'].get('source_label','')}  \n"
-                        f"**分析区间：** {selected['meta'].get('start_sec_used',0):.1f}–{selected['meta'].get('end_sec_used',0):.1f} 秒  \n"
-                        f"**帧数：** {selected['meta'].get('frame_count',0)}  \n"
-                        f"**模型：** {selected['meta'].get('model','')}"
+                        f"共抽取 **{len(images)}** 个关键帧，其中前 **{min(len(images), max_ai_frames_safe)}** 帧做了 AI 分析和 Midjourney 提示词生成。"
                     )
+                    st.markdown("---")
 
-                    hist_json = json.dumps(
-                        selected["data"], ensure_ascii=False, indent=2
-                    )
+                    for i, (img, info, palette) in enumerate(
+                        zip(images, frame_infos, frame_palettes)
+                    ):
+                        with st.container():
+                            st.markdown(f"### 📘 关键帧 {i + 1}")
+
+                            c1, c2 = st.columns([1.2, 2])
+
+                            with c1:
+                                st.image(
+                                    img,
+                                    caption=f"第 {i + 1} 帧画面",
+                                    width=DISPLAY_IMAGE_WIDTH,
+                                )
+                                palette_img = make_palette_image(palette)
+                                st.image(
+                                    palette_img,
+                                    caption="主色调色卡",
+                                    width=PALETTE_WIDTH,
+                                )
+                                if palette:
+                                    hex_list = ", ".join(
+                                        rgb_to_hex(c) for c in palette
+                                    )
+                                    st.caption(f"主色 HEX：{hex_list}")
+
+                            with c2:
+                                cam = info.get("camera", {})
+                                tags = info.get("tags_zh", [])
+                                analysis_text = "\n".join(
+                                    [
+                                        f"【景别】{cam.get('shot_type_zh', '')}",
+                                        f"【运镜】{cam.get('movement_zh', '')}",
+                                        f"【拍摄角度】{cam.get('angle_zh', '')}",
+                                        f"【构图】{cam.get('composition_zh', '')}",
+                                        f"【色彩与光影】{info.get('color_and_light_zh', '')}",
+                                        f"【画面内容】{info.get('scene_description_zh', '')}",
+                                        f"【情绪氛围】{info.get('mood_zh', '')}",
+                                        f"【关键词标签】{' '.join(tags)}",
+                                    ]
+                                ).strip()
+
+                                st.markdown("**分镜分析（可复制）：**")
+                                st.code(
+                                    analysis_text
+                                    or "（暂无分镜分析，可能未做 AI 分析）",
+                                    language="markdown",
+                                )
+
+                                st.markdown("**Midjourney 提示词（可复制）：**")
+                                st.code(
+                                    info.get("midjourney_prompt")
+                                    or "（暂无 Midjourney 提示词，可能未做 AI 分析）",
+                                    language="markdown",
+                                )
+
+                                st.markdown("**Midjourney 负面提示词（可选）：**")
+                                st.code(
+                                    info.get("midjourney_negative_prompt") or "",
+                                    language="markdown",
+                                )
+
+                            st.markdown("---")
+
+                # --- Tab2：整体分析 + 广告文案 + 时间轴分镜 ---
+                with tab_story:
+                    st.markdown("### 📚 整体剧情与视听风格总结")
+                    st.code(overall, language="markdown")
+
+                    st.markdown("### 🎤 10 秒广告旁白脚本")
+                    st.code(ad_script, language="markdown")
+
+                    st.markdown("### 🎬 时间轴分镜脚本（可复制）")
+                    st.code(timeline_shotlist, language="markdown")
+
+                # --- Tab3：本次 JSON 导出 ---
+                with tab_json:
+                    st.markdown("### 📦 下载本次分析的 JSON 文件")
                     st.download_button(
-                        label="⬇️ 下载该历史记录 JSON",
-                        data=hist_json,
-                        file_name=f"video_analysis_{selected['id']}.json",
+                        label="⬇️ 下载本次 video_analysis.json",
+                        data=json_str,
+                        file_name="video_analysis.json",
                         mime="application/json",
                     )
 
-                    frames = selected["data"].get("frames", [])
-                    if frames:
-                        st.markdown("#### 部分帧预览（场景 + MJ 提示词）")
-                        for f in frames[:3]:
-                            st.markdown(f"**第 {f.get('index')} 帧：**")
-                            st.write(f.get("scene_description_zh", ""))
-                            mj = f.get("midjourney_prompt", "")
-                            if mj:
-                                st.code(mj, language="markdown")
-                            st.markdown("---")
+                    with st.expander("🔍 预览部分 JSON 内容"):
+                        preview = json_str[:3000] + (
+                            "\n...\n" if len(json_str) > 3000 else ""
+                        )
+                        st.code(preview, language="json")
+
+                # --- Tab4：历史记录（当前会话） ---
+                with tab_history:
+                    st.markdown("### 🕘 当前会话历史记录（刷新页面会清空）")
+
+                    history = st.session_state.get("analysis_history", [])
+                    if not history:
+                        st.info("当前会话还没有任何历史记录。")
+                    else:
+                        options = [
+                            f"{len(history) - i}. {h['created_at']} | {h['meta'].get('source_label','')} | "
+                            f"{h['meta'].get('frame_count',0)} 帧 | 区间 {h['meta'].get('start_sec_used',0):.1f}-{h['meta'].get('end_sec_used',0):.1f}s"
+                            for i, h in enumerate(reversed(history))
+                        ]
+                        idx_display = st.selectbox(
+                            "选择一条历史记录查看",
+                            options=list(range(len(history))),
+                            format_func=lambda i: options[i],
+                        )
+                        real_index = len(history) - 1 - idx_display
+                        selected = history[real_index]
+
+                        st.markdown(
+                            f"**ID：** `{selected['id']}`  \n"
+                            f"**时间：** {selected['created_at']}  \n"
+                            f"**来源类型：** {selected['meta'].get('source_type','')}  \n"
+                            f"**来源标识：** {selected['meta'].get('source_label','')}  \n"
+                            f"**分析区间：** {selected['meta'].get('start_sec_used',0):.1f}–{selected['meta'].get('end_sec_used',0):.1f} 秒  \n"
+                            f"**帧数：** {selected['meta'].get('frame_count',0)}  \n"
+                            f"**模型：** {selected['meta'].get('model','')}"
+                        )
+
+                        hist_json = json.dumps(
+                            selected["data"], ensure_ascii=False, indent=2
+                        )
+                        st.download_button(
+                            label="⬇️ 下载该历史记录 JSON",
+                            data=hist_json,
+                            file_name=f"video_analysis_{selected['id']}.json",
+                            mime="application/json",
+                        )
+
+                        frames = selected["data"].get("frames", [])
+                        if frames:
+                            st.markdown("#### 部分帧预览（场景 + MJ 提示词）")
+                            for f in frames[:3]:
+                                st.markdown(f"**第 {f.get('index')} 帧：**")
+                                st.write(f.get("scene_description_zh", ""))
+                                mj = f.get("midjourney_prompt", "")
+                                if mj:
+                                    st.code(mj, language="markdown")
+                                st.markdown("---")
 
         except Exception as e:
             st.error(f"下载或解析视频时发生错误：{e}")
