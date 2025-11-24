@@ -8,14 +8,14 @@ from PIL import Image, ImageDraw
 import concurrent.futures
 import json
 from datetime import datetime
-import yt_dlp  # 用于从抖音/B站/TikTok/YouTube 等下载视频
+import yt_dlp  # 抖音/B站/TikTok/YouTube 下载
 from typing import Optional, Tuple, List, Dict, Any
 
 # ========================
 # 全局配置
 # ========================
 
-GEMINI_MODEL_NAME = "gemini-flash-latest"  # 可按需替换，比如 gemini-2.5-flash-lite
+GEMINI_MODEL_NAME = "gemini-flash-latest"  # 可换成 gemini-2.5-flash-lite 等
 
 DISPLAY_IMAGE_WIDTH = 320
 PALETTE_WIDTH = 320
@@ -63,7 +63,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 顶部 Hero
 st.markdown(
     """
     <div style="
@@ -78,7 +77,7 @@ st.markdown(
       </h1>
       <p style="margin: 0; color: #cbd5f5; font-size: 0.96rem;">
         上传视频或输入抖音/B站/TikTok/YouTube 链接，设置分析时间区间，自动抽取关键帧，生成
-        <b>结构化 JSON + Midjourney 提示词 + 分镜解读 + 剧情大纲 + 10 秒广告旁白</b>，
+        <b>结构化 JSON + Midjourney 提示词 + 分镜解读 + 剧情大纲 + 10 秒广告旁白 + 时间轴分镜脚本</b>，
         并在当前会话中保存多条分析记录，方便对比与下载。
       </p>
     </div>
@@ -101,10 +100,6 @@ def extract_keyframes_dynamic(
 ) -> Tuple[List[Image.Image], float, Tuple[float, float]]:
     """
     根据视频时长自动抽取关键帧，仅在 [start_sec, end_sec] 范围内。
-    - ideal_n = segment_duration * base_fps
-    - 限制在 [min_frames, max_frames]
-    - 均匀抽帧
-
     返回：
       images: 抽到的 PIL.Image 列表
       duration: 整条视频总时长（秒）
@@ -132,7 +127,7 @@ def extract_keyframes_dynamic(
     end_frame_excl = min(total_frames, int(end_sec * fps))
     segment_frames = end_frame_excl - start_frame
 
-    # 防御：如果时间范围非法，就退回整段视频
+    # 如果区间非法，退回整段
     if segment_frames <= 0:
         start_sec = 0.0
         end_sec = duration
@@ -168,14 +163,11 @@ def extract_keyframes_dynamic(
 
 
 # ========================
-# 从链接下载视频（抖音/B站/TikTok/YouTube 等）
+# 从链接下载视频
 # ========================
 
 def download_video_from_url(url: str) -> str:
-    """
-    使用 yt-dlp 从给定 URL 下载视频到临时文件，返回本地文件路径。
-    适用于抖音 / TikTok / B站 / YouTube 等支持站点。
-    """
+    """使用 yt-dlp 从给定 URL 下载视频到临时文件，返回路径。"""
     if not url:
         raise ValueError("视频链接为空")
 
@@ -553,6 +545,83 @@ def generate_ad_script(frame_infos: List[Dict[str, Any]], model) -> str:
 
 
 # ========================
+# 时间轴分镜脚本生成
+# ========================
+
+def generate_timeline_shotlist(
+    frame_infos: List[Dict[str, Any]],
+    used_range: Tuple[float, float],
+    model,
+) -> str:
+    """
+    生成类似：
+    【0-1.5 秒】
+    女孩走在清晨薄雾的森林里，阳光从树间照进来。电影级画面。
+    机位：50mm，f1.8，慢速推镜。
+    """
+    described = [
+        info
+        for info in frame_infos
+        if info.get("scene_description_zh")
+        and "未做 AI 分析" not in info["scene_description_zh"]
+        and "AI 分析失败" not in info["scene_description_zh"]
+    ]
+    if not described:
+        return "（暂未获取到有效的帧级分析，无法生成时间轴分镜脚本。）"
+
+    start_used, end_used = used_range
+    total_len = max(0.1, end_used - start_used)
+
+    parts = []
+    for info in described:
+        idx = info["index"]
+        cam = info.get("camera", {})
+        tags = info.get("tags_zh", [])
+        parts.append(
+            f"第 {idx} 帧：{info.get('scene_description_zh','')}\n"
+            f"景别：{cam.get('shot_type_zh','')}；角度：{cam.get('angle_zh','')}；运镜：{cam.get('movement_zh','')}；构图：{cam.get('composition_zh','')}\n"
+            f"标签：{'、'.join(tags)}"
+        )
+    overview = "\n\n".join(parts)
+
+    prompt = f"""
+你是一名专业分镜头脚本师，请根据给出的帧级信息，为这一段视频写一个「时间轴分镜脚本」。
+
+该段视频分析区间总长约为 {total_len:.1f} 秒（从 0 秒开始计时，到 {total_len:.1f} 秒结束）。
+请按时间顺序划分为若干段（通常 3~8 段），每一段时长约 1~3 秒。
+
+下面是帧级分析概览（供参考）：
+
+=== 帧级概览开始 ===
+{overview}
+=== 帧级概览结束 ===
+
+请严格按照下面格式输出分镜（示例）：
+
+【0-1.5 秒】
+女孩走在清晨薄雾的森林里，阳光从树间照进来。电影级画面。
+机位：50mm，f1.8，慢速推镜。
+
+【1.5-3 秒】
+特写镜头：她的手轻轻划过带露水的叶子，微距细节清晰可见。
+机位：90mm 微距，轻微推近。
+
+具体要求：
+1. 时间从 0 秒开始，单位为“秒”，用阿拉伯数字，区间用“-”连接，并在末尾写“秒”，如【0-1.5 秒】。
+2. 各时间段区间必须连续且不重叠，最后一段的结束时间应接近 {total_len:.1f} 秒。
+3. 每段至少两行：第一行描述画面和情绪，第二行以“机位：”开头，简要写焦段/视角/运镜（用中文）。
+4. 使用简洁中文，不要解释模型过程，也不要添加额外标题或总结文字，只输出分镜列表。
+
+现在请直接输出时间轴分镜脚本。
+"""
+    try:
+        resp = model.generate_content(prompt)
+        return _extract_text_from_response(resp)
+    except Exception as e:
+        return f"时间轴分镜脚本生成失败：{e}"
+
+
+# ========================
 # 侧边栏：API Key & 参数设置
 # ========================
 
@@ -576,7 +645,6 @@ with st.sidebar:
     )
     st.caption("建议：10 秒视频 6~10 帧即可；超出部分仍会显示截图和色卡，但不调 AI。")
 
-    # ⭐ 新增：分析时间范围（秒）
     st.markdown("---")
     st.markdown("⏱ 分析时间范围（单位：秒）")
     start_sec = st.number_input(
@@ -613,7 +681,6 @@ if api_key:
 # 主流程：上传/链接 选择 + 抽帧 + 分析 + 布局展示
 # ========================
 
-# 选择视频来源
 source_mode = st.radio(
     "📥 选择视频来源",
     ["上传本地文件", "输入网络视频链接（抖音 / B站 / TikTok / YouTube）"],
@@ -643,7 +710,7 @@ if st.button("🚀 一键解析整条视频"):
         source_type = ""
 
         try:
-            # 1. 准备本地视频文件路径
+            # 1. 准备视频路径
             if source_mode == "上传本地文件":
                 source_type = "upload"
                 if not uploaded_file:
@@ -667,7 +734,7 @@ if st.button("🚀 一键解析整条视频"):
                 st.error("视频路径异常，请重试。")
                 st.stop()
 
-            # 2. 抽关键帧（带时间区间）
+            # 2. 抽帧（带时间区间）
             st.info("⏳ 正在根据指定时间区间自动抽取关键帧...")
             images, duration, used_range = extract_keyframes_dynamic(
                 tmp_path,
@@ -676,7 +743,6 @@ if st.button("🚀 一键解析整条视频"):
             )
             start_used, end_used = used_range
 
-            # 用完删除临时文件
             try:
                 os.remove(tmp_path)
             except OSError:
@@ -691,7 +757,7 @@ if st.button("🚀 一键解析整条视频"):
                 f"本次分析区间：{start_used:.1f}–{end_used:.1f} 秒，最多对 {max_ai_frames} 帧做 AI 分析）。"
             )
 
-            # 3. 计算主色调
+            # 3. 主色调
             frame_palettes: List[List[Tuple[int, int, int]]] = []
             for img in images:
                 try:
@@ -700,18 +766,23 @@ if st.button("🚀 一键解析整条视频"):
                     palette_colors = []
                 frame_palettes.append(palette_colors)
 
-            # 4. 调 Gemini 做逐帧分析
+            # 4. 帧级分析
             with st.spinner("🧠 正在为关键帧生成结构化分析 + Midjourney 提示词..."):
                 frame_infos = analyze_images_concurrently(
                     images, model, max_ai_frames=max_ai_frames
                 )
 
+            # 5. 整体分析 + 广告文案 + 时间轴分镜
             with st.spinner("📚 正在生成整段视频的剧情大纲与话题标签..."):
                 overall = analyze_overall_video(frame_infos, model)
             with st.spinner("🎤 正在生成 10 秒广告旁白脚本..."):
                 ad_script = generate_ad_script(frame_infos, model)
+            with st.spinner("🎬 正在生成时间轴分镜脚本..."):
+                timeline_shotlist = generate_timeline_shotlist(
+                    frame_infos, used_range=used_range, model=model
+                )
 
-            # 5. 组装 export_data，并写入历史记录
+            # 6. 组装 export_data + 写入历史记录
             export_frames = []
             for info, palette in zip(frame_infos, frame_palettes):
                 export_frames.append(
@@ -739,17 +810,17 @@ if st.button("🚀 一键解析整条视频"):
                     "duration_sec_est": duration,
                     "start_sec_used": start_used,
                     "end_sec_used": end_used,
-                    "source_type": source_type,      # upload / url
-                    "source_label": source_label,    # 文件名 或 链接
+                    "source_type": source_type,
+                    "source_label": source_label,
                 },
                 "frames": export_frames,
                 "overall_analysis": overall,
                 "ad_script_10s": ad_script,
+                "timeline_shotlist_zh": timeline_shotlist,
             }
 
             json_str = json.dumps(export_data, ensure_ascii=False, indent=2)
 
-            # 历史记录入库
             history = st.session_state["analysis_history"]
             run_id = f"run_{len(history) + 1}"
             history.append(
@@ -762,11 +833,11 @@ if st.button("🚀 一键解析整条视频"):
             )
             st.session_state["analysis_history"] = history
 
-            # 6. Tabs 展示
+            # 7. Tabs 展示
             tab_frames, tab_story, tab_json, tab_history = st.tabs(
                 [
                     "🎞 关键帧 & MJ 提示词",
-                    "📚 剧情总结 & 广告旁白",
+                    "📚 剧情总结 & 广告旁白 & 时间轴分镜",
                     "📦 JSON 导出（本次）",
                     "🕘 历史记录（本会话）",
                 ]
@@ -841,13 +912,16 @@ if st.button("🚀 一键解析整条视频"):
 
                         st.markdown("---")
 
-            # --- Tab2：整体分析 + 广告文案 ---
+            # --- Tab2：整体分析 + 广告文案 + 时间轴分镜 ---
             with tab_story:
                 st.markdown("### 📚 整体剧情与视听风格总结")
                 st.code(overall, language="markdown")
 
                 st.markdown("### 🎤 10 秒广告旁白脚本")
                 st.code(ad_script, language="markdown")
+
+                st.markdown("### 🎬 时间轴分镜脚本（可复制）")
+                st.code(timeline_shotlist, language="markdown")
 
             # --- Tab3：本次 JSON 导出 ---
             with tab_json:
