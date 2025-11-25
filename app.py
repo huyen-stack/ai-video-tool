@@ -281,7 +281,7 @@ def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
     """
     对单帧做全面分析：
     - 中文分镜（景别/机位/光线/情绪/标签）
-    - 人物服饰/表情/动作/道具（characters + character_action_detail_zh）
+    - 人物服饰/表情/动作/道具
     - 场景细节 / 科技道具 / 动作趋势
     - 物理 & 环境细节（风雨雪、头发衣物反应、受力形变、结构破坏、碎片飞散等）
     - Midjourney 提示词
@@ -335,7 +335,7 @@ def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
       "age_look_zh": "年龄观感，例如：20多岁 / 中年",
       "body_type_zh": "体型，例如：偏瘦 / 健壮",
       "clothing_zh": "服装风格与颜色，例如：白色科技感紧身衣，带蓝色发光纹路",
-      "hair_zh": "发型与发色，例如：短发，银色挑染",
+      "hair_zh": "发型与发色，例如：短发，黑色或银色挑染",
       "expression_zh": "面部表情，例如：专注、愤怒、惊讶、轻松微笑",
       "pose_body_zh": "身体姿态，例如：前倾操作控制台 / 半蹲准备起跳 / 身体后仰正在刹车",
       "props_zh": "人物手上或身上明显可见的道具，例如：手枪、光剑、平底锅、平板电脑、飞行扫帚"
@@ -371,6 +371,7 @@ def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
     "4）背景中可识别的建筑/山体/城市天际线/窗外景色；"
     "5）地面和顶部的感觉（例如：水泥地、木地板、带油污的瓷砖地、裸露管线的天花板）。"
     "不要只写“在一个房间里”，必须写到能让美术师按文字搭景的程度。"
+    "如画面以天空/云层/海面等为主，也要写出云层形态、海浪走势、远处地貌等。"
   ),
 
   "weather_force_detail_zh": (
@@ -384,7 +385,6 @@ def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
     "用 1～3 句中文，列出画面中最重要的 3～8 个道具/科技元素，并说明它们的外观、位置和状态。"
     "例如：“左前景是一个银色笔记本电脑，屏幕发出冷蓝色光；人物右手边有一台黑色咖啡机，机身有水渍反光；"
     "背景墙上挂着两幅抽象画；天空中有两架无人机从左向右飞过；画面右侧是一块半透明蓝色全息屏幕，悬浮在空中，显示数据图表”。"
-    "不要只说“有很多科技感道具”，必须写出具体是什么、在哪儿、是什么质感。"
   ),
 
   "physics_reaction_detail_zh": (
@@ -406,10 +406,7 @@ def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
 
   "motion_detail_zh": (
     "用 1～3 句中文，从“上一瞬间→当前瞬间→下一瞬间”的顺序，描述这一镜头所属动作片段。"
-    "如果能从画面推断出大致动作，请写清：上一瞬间人物大概在做什么（例如：在山坡末端加速起跳 / 刚从机翼边缘滑落），"
-    "当前瞬间画面定格在什么状态（例如：摩托车已经离开山地，在飞机机翼上方半空，人物身体前倾准备跳跃），"
-    "下一瞬间极有可能发生什么（例如：摩托车继续飞出镜头外，人物放弃车身用手去抓飞机机翼或边缘）。"
-    "如果是非动作场景，也要描述是准备动作、高潮动作还是收束动作。"
+    "如果能从画面推断出大致动作，请写清：上一瞬间人物大概在做什么，当前瞬间画面定格在什么状态，下一瞬间极有可能发生什么。"
   ),
 
   "fx_detail_zh": (
@@ -417,7 +414,8 @@ def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
   ),
 
   "lighting_color_detail_zh": (
-    "在 color_and_light_zh 的基础上，进一步用 1～2 句中文精细描述光源数量、方向、色温差异、是否有闪电/爆光/频闪等。"
+    "在 color_and_light_zh 的基础上，进一步用 1～2 句中文精细描述光源数量、方向、色温差异、"
+    "是否有闪电/爆光/频闪等。"
   ),
 
   "audio_cue_detail_zh": (
@@ -760,7 +758,7 @@ def generate_ad_script(frame_infos: List[Dict[str, Any]], model) -> str:
 
 
 # ========================
-# 时间轴分镜脚本生成（纯拼接版：包含所有帧信息）
+# 时间轴分镜脚本生成（纯拼接版）
 # ========================
 
 def generate_timeline_shotlist(
@@ -785,19 +783,16 @@ def generate_timeline_shotlist(
     lines: List[str] = []
 
     for i, info in enumerate(frame_infos):
-        # 时间段（从 0 开始，更适合做时间轴）
         t0 = i * seg
         t1 = (i + 1) * seg
         if i == n - 1:
-            t1 = total_len  # 最后一段对齐到结尾
+            t1 = total_len
 
         shot_id = f"S{i+1:02d}"
 
-        # 相机 / 机位信息
         cam = info.get("camera", {}) or {}
         tags = info.get("tags_zh", []) or []
 
-        # 基础画面信息
         scene = (info.get("scene_description_zh") or "").strip()
         char_act = (info.get("character_action_detail_zh") or "").strip()
         env = (info.get("environment_detail_zh") or "").strip()
@@ -805,13 +800,11 @@ def generate_timeline_shotlist(
         motion = (info.get("motion_detail_zh") or "").strip()
         mood = (info.get("mood_zh") or "").strip()
 
-        # 机位字段
         shot_type = cam.get("shot_type_zh", "")
         angle = cam.get("angle_zh", "")
         movement = cam.get("movement_zh", "")
         composition = cam.get("composition_zh", "")
 
-        # 精细维度
         face = (info.get("face_expression_detail_zh") or "").strip()
         cloth_hair = (info.get("cloth_hair_reaction_zh") or "").strip()
         weather = (info.get("weather_force_detail_zh") or "").strip()
@@ -824,51 +817,36 @@ def generate_timeline_shotlist(
         edit = (info.get("edit_rhythm_detail_zh") or "").strip()
 
         block_lines: List[str] = []
-
-        # 标题行：镜头 ID + 时间段
         block_lines.append(f"【{shot_id} | {t0:.1f}-{t1:.1f} 秒】")
 
-        # 画面 & 人物
         if scene:
             block_lines.append(f"画面内容：{scene}")
-
         if char_act:
             block_lines.append(f"人物动作：{char_act}")
-
         if face:
             block_lines.append(f"面部与眼神：{face}")
-
         if cloth_hair:
             block_lines.append(f"服装与头发：{cloth_hair}")
 
-        # 场景 & 环境力
         if env:
             block_lines.append(f"场景与空间：{env}")
-
         if weather:
             block_lines.append(f"天气与环境力：{weather}")
 
-        # 道具 & 破坏
         if props:
             block_lines.append(f"道具与科技：{props}")
-
         if structure_damage:
             block_lines.append(f"结构损坏：{structure_damage}")
-
         if debris_motion:
             block_lines.append(f"碎片与飞散轨迹：{debris_motion}")
-
         if physics:
             block_lines.append(f"受力与物理反馈：{physics}")
 
-        # 特效 / 光线
         if fx:
             block_lines.append(f"特效与粒子：{fx}")
-
         if lighting:
             block_lines.append(f"光线与色彩：{lighting}")
 
-        # 机位 / 情绪 / 动作趋势
         cam_desc_parts = []
         if shot_type:
             cam_desc_parts.append(f"景别：{shot_type}")
@@ -883,18 +861,14 @@ def generate_timeline_shotlist(
 
         if mood:
             block_lines.append(f"情绪氛围：{mood}")
-
         if motion:
             block_lines.append(f"动作趋势：{motion}")
 
-        # 声音 / 剪辑节奏
         if audio:
             block_lines.append(f"声音与节奏：{audio}")
-
         if edit:
             block_lines.append(f"剪辑与节奏：{edit}")
 
-        # 标签
         if tags:
             block_lines.append("标签：" + " ".join(tags))
 
@@ -1048,8 +1022,7 @@ if st.button("🚀 一键解析整条视频"):
                     frame_palettes.append(palette_colors)
 
                 # ⭐ 控制本次 AI 调用总数不超过免费 10 次
-                # 现在只剩：整体分析 + 广告文案 两类额外调用
-                overhead_calls = 2  # overall + ad_script
+                overhead_calls = 2  # 整体 + 广告文案
                 max_ai_frames_safe = max(
                     1,
                     min(max_ai_frames, FREE_TIER_RPM_LIMIT - overhead_calls),
@@ -1066,13 +1039,11 @@ if st.button("🚀 一键解析整条视频"):
                         images, model, max_ai_frames=max_ai_frames_safe
                     )
 
-                # 5. 整体分析 + 广告文案 + 时间轴分镜（时间轴为纯拼接，不再调 AI）
+                # 5. 整体分析 + 广告文案 + 时间轴分镜（时间轴为纯拼接）
                 with st.spinner("📚 正在生成整段视频的剧情大纲与话题标签..."):
                     overall = analyze_overall_video(frame_infos, model)
                 with st.spinner("🎤 正在生成 10 秒广告旁白脚本..."):
                     ad_script = generate_ad_script(frame_infos, model)
-
-                # 纯拼接时间轴
                 with st.spinner("🎬 正在生成时间轴分镜脚本（纯拼接版）..."):
                     timeline_shotlist = generate_timeline_shotlist(
                         frame_infos, used_range=used_range
@@ -1224,7 +1195,7 @@ if st.button("🚀 一键解析整条视频"):
                                     language="markdown",
                                 )
 
-                                # 新增：高级动作 / 环境力 / 物理反馈 组合展示
+                                # 高级物理/环境细节组合展示
                                 advanced_detail = []
                                 if info.get("face_expression_detail_zh"):
                                     advanced_detail.append("【面部与眼神】" + info["face_expression_detail_zh"])
