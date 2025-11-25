@@ -15,8 +15,10 @@ from typing import Optional, Tuple, List, Dict, Any
 # 全局配置
 # ========================
 
-GEMINI_MODEL_NAME = "gemini-flash-latest"  # 可换 gemini-2.5-flash-lite 等
-FREE_TIER_RPM_LIMIT = 10  # 免费版大约每分钟 10 次 generateContent
+GEMINI_MODEL_NAME = "gemini-flash-latest"  # 可换成 gemini-2.5-flash-lite 等
+
+# 免费版典型速率：每分钟 10 次 generateContent
+FREE_TIER_RPM_LIMIT = 10
 
 DISPLAY_IMAGE_WIDTH = 320
 PALETTE_WIDTH = 320
@@ -26,11 +28,18 @@ PALETTE_HEIGHT = 26
 if "api_key" not in st.session_state:
     st.session_state["api_key"] = ""
 if "analysis_history" not in st.session_state:
+    # 每条元素结构：
+    # {
+    #   "id": "run_1",
+    #   "created_at": "...",
+    #   "meta": {...},
+    #   "data": {... 完整 export_data ...}
+    # }
     st.session_state["analysis_history"] = []
 
 
 # ========================
-# 页面样式
+# 页面 / 全局样式
 # ========================
 
 st.set_page_config(
@@ -67,11 +76,11 @@ st.markdown(
         border: 1px solid rgba(148, 163, 184, 0.35);
     ">
       <h1 style="margin: 0 0 8px 0; color: #e5e7eb; font-size: 1.6rem;">
-        🎬 AI 自动关键帧分镜助手 Pro · SORA/VEO 提示词 + 时间区间 + 历史记录
+        🎬 AI 自动关键帧分镜助手 Pro · SORA/VEO 视频提示词 + 时间区间 + 历史记录
       </h1>
       <p style="margin: 0; color: #cbd5f5; font-size: 0.96rem;">
         上传视频或输入抖音/B站/TikTok/YouTube 链接，设置分析时间区间，自动抽取关键帧，生成
-        <b>结构化 JSON + Midjourney 提示词 + SORA/VEO 英文视频提示词 + 剧情大纲 + 10 秒广告旁白 + 时间轴总览</b>，
+        <b>结构化 JSON + Midjourney 提示词 + SORA/VEO 英文视频提示词 + 分镜解读 + 剧情大纲 + 10 秒广告旁白 + 时间轴分镜脚本</b>，
         并在当前会话中保存多条分析记录，方便对比与下载。
       </p>
     </div>
@@ -97,7 +106,7 @@ def extract_keyframes_dynamic(
     返回：
       images: 抽到的 PIL.Image 列表
       duration: 整条视频总时长（秒）
-      used_range: (start_used, end_used) 实际分析时间范围（秒）
+      used_range: (start_used, end_used) 实际生效的分析时间范围（秒）
     """
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -109,9 +118,9 @@ def extract_keyframes_dynamic(
         cap.release()
         return [], 0.0, (0.0, 0.0)
 
-    duration = total_frames / fps
+    duration = total_frames / fps  # 整条视频时长
 
-    # 规范时间范围
+    # 规范化时间范围
     if start_sec is None or start_sec < 0:
         start_sec = 0.0
     if end_sec is None or end_sec <= start_sec or end_sec > duration:
@@ -121,7 +130,7 @@ def extract_keyframes_dynamic(
     end_frame_excl = min(total_frames, int(end_sec * fps))
     segment_frames = end_frame_excl - start_frame
 
-    # 区间非法则退回整段
+    # 如果区间非法，退回整段
     if segment_frames <= 0:
         start_sec = 0.0
         end_sec = duration
@@ -184,7 +193,7 @@ def download_video_from_url(url: str) -> str:
 
 
 # ========================
-# 主色调色卡
+# 主色调色卡相关
 # ========================
 
 def get_color_palette(pil_img: Image.Image, num_colors: int = 5):
@@ -273,64 +282,166 @@ def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
     对单帧做全面分析：
     - 中文分镜（景别/机位/光线/情绪/标签）
     - 人物服饰/表情/动作/道具
-    - 场景细节 / 天气 / 物理受力 / 结构损坏 / 碎片 / 特效
+    - 场景细节 / 科技道具 / 动作趋势
+    - 物理 & 环境细节（风雨雪、头发衣物反应、受力形变、结构破坏、碎片飞散等）
     - Midjourney 提示词
     - SORA/VEO 用英文视频提示词 video_prompt_en
     """
     try:
         prompt = f"""
-你现在是「电影导演 + 摄影指导 + 服化道总监 + 提示词工程师」。
+你现在是电影导演 + 摄影指导 + 服化道总监 + 提示词工程师。
+请仔细分析给你的这一帧画面，并输出一个 JSON 对象，用于：
+1）人类导演阅读分镜
+2）Midjourney 生成分镜图
+3）SORA/VEO 等视频模型生成对应镜头
 
-请基于给你的这一帧画面，只输出一个 JSON 对象（不要任何解释），字段要求如下：
+必须使用下面这些 key（英文），value 大部分为中文说明，英文提示词字段为英文：
 
-- "index": 整数，固定为 {index}
-- "scene_description_zh": 当前画面的整体中文描述（1-3 句，包含人物+动作+场景空间+视角）
-- "tags_zh": 短中文标签数组，例如 ["#高速追逐", "#空中滑翔"]
-- "camera": 对象，包含：
-  - "shot_type_zh", "shot_type"
-  - "angle_zh", "angle"
-  - "movement_zh", "movement"
-  - "composition_zh", "composition"
-- "color_and_light_zh": 色彩与光线
-- "mood_zh": 情绪氛围
+{{
+  "index": 整数，当前帧序号，固定为 {index},
 
-- "characters": 数组，每个元素为一个人物对象：
-  - "role_zh": 人物身份（女主/男主/冒险者/船长等）
-  - "gender_zh": 性别
-  - "age_look_zh": 年龄观感
-  - "body_type_zh": 体型
-  - "clothing_zh": 服装风格与颜色（后续统一服装会用到）
-  - "hair_zh": 发型发色
-  - "expression_zh": 简要表情
-  - "pose_body_zh": 身体姿态
-  - "props_zh": 该人物身上或手持的道具
+  "scene_description_zh": (
+    "用 1～3 句完整中文，把当前画面描述得尽量具体，必须同时包含："
+    "1）主要人物的身份 + 大致年龄 + 性别 + 外观特征（尤其是服装颜色/款式、是否有披风、头饰等）；"
+    "2）此刻正在做的动作以及动作方向和速度感（例如：从画面右上高速滑向左下、抬手推开门、低头看手机），"
+    "如果画面明显处在一个极限动作过程之中（例如：摩托车刚从山坡飞出准备落在飞机机翼上，人物即将抛弃载具跳到机翼上），"
+    "要用一句完整的话把“从哪里飞来/飞向哪里”的运动路径说出来，而不是只写“人物在空中”或“在飞机旁边”；"
+    "3）所在的场景类型与空间结构（例如：临海山路、峡谷、城市高楼之间的空中轨道），分清前景/中景/背景里各有什么物体（悬崖、海面、树木、房屋、车流等），以及地形特征（蜿蜒、陡坡、悬空平台等）；"
+    "4）镜头相对人物的位置和视角（例如：第一人称视角、紧贴背后的追随视角、肩膀后视角、从侧后方略仰拍、俯视俯冲等），以及镜头大致沿着什么方向运动。"
+    "禁止只写“某人站在某处”或“人物在路上移动”这种模糊句子，必须写到让美术或 3D 场景师能按文字搭场景的程度；"
+    "忽略画面中的 App UI 图标/文字/界面元素，不要把抖音/快手按钮写进描述。"
+  ),
 
-- "character_action_detail_zh": 用 1-3 句详细写清此人物现在的动作（头/上肢/躯干/下肢及接触点）
-- "face_expression_detail_zh": 面部与眼神细节（肌肉紧张度、眼睛状态、是否有变形等）
-- "cloth_hair_reaction_zh": 头发与衣物在风/速度/爆炸等影响下的形态（被吹起、紧贴身体等）
+  "tags_zh": ["#短中文标签1", "#标签2", "..."],
 
-- "environment_detail_zh": 按前景/中景/背景描述场景空间结构（室内/室外/地形/建筑等）
-- "weather_force_detail_zh": 风/雨/雪/冲击波/气流等环境力的方向和强度及对人物的影响
+  "camera": {{
+    "shot_type_zh": "景别，例如：远景 / 全景 / 中景 / 中近景 / 近景 / 特写",
+    "shot_type": "英文景别，例如：wide shot, full shot, medium shot, medium close-up, close-up",
+    "angle_zh": "拍摄角度，例如：俯拍 / 仰拍 / 平视 / 上帝视角 / 侧拍等",
+    "angle": "英文角度描述，例如：eye-level, low angle, high angle, top-down",
+    "movement_zh": "运镜方式，例如：静止镜头 / 缓慢推近 / 手持跟拍 / 横移 / 甩镜 等",
+    "movement": "英文运镜描述，例如：slow dolly-in, handheld tracking from left to right",
+    "composition_zh": "构图方式，例如：三分法构图 / 中心构图 / 对称构图 / 前景-主体-背景 等",
+    "composition": "英文构图描述，例如：rule-of-thirds, subject on right third, strong foreground elements"
+  }},
 
-- "props_and_tech_detail_zh": 场景中重要道具/科技元素的外观与位置
-- "physics_reaction_detail_zh": 受力与物理反馈（如拳头打在脸上形成形变→回弹、车辆撞击等）
-- "structure_damage_detail_zh": 物体/建筑/车辆/机翼等的结构损坏情况（如果没有可写“无明显结构损坏”）
-- "debris_motion_detail_zh": 碎片/玻璃渣/石块/零件的飞散轨迹（如果没有可写“无明显碎片飞散”）
+  "color_and_light_zh": "用 1～2 句中文描述画面的整体色调和光线（色温/对比/主光源方向及是否有逆光/轮廓光等）",
+  "mood_zh": "用中文概括情绪氛围（紧张/温暖/梦幻/冷峻/商业感等）",
 
-- "motion_detail_zh": 上一瞬间→当前→下一瞬间的动作趋势
-- "fx_detail_zh": 火花/烟雾/尘土/能量波等特效的形态与运动
-- "lighting_color_detail_zh": 光源数量/方向/色温差异/是否有轮廓光、闪光等
-- "audio_cue_detail_zh": 推测的声音设计（环境声/特效声/BGM 节奏感）
-- "edit_rhythm_detail_zh": 剪辑节奏（正常/慢动作/加速/甩镜转场等）
+  "characters": [
+    {{
+      "role_zh": "人物身份，例如：女主 / 男主 / 科学家 / 侦探 / 厨师",
+      "gender_zh": "性别，例如：女性 / 男性 / 不明显",
+      "age_look_zh": "年龄观感，例如：20多岁 / 中年",
+      "body_type_zh": "体型，例如：偏瘦 / 健壮",
+      "clothing_zh": "服装风格与颜色，例如：白色科技感紧身衣，带蓝色发光纹路",
+      "hair_zh": "发型与发色，例如：短发，黑色或银色挑染",
+      "expression_zh": "面部表情，例如：专注、愤怒、惊讶、轻松微笑",
+      "pose_body_zh": "身体姿态，例如：前倾操作控制台 / 半蹲准备起跳 / 身体后仰正在刹车",
+      "props_zh": "人物手上或身上明显可见的道具，例如：手枪、光剑、平底锅、平板电脑、飞行扫帚"
+    }}
+  ],
 
-- "midjourney_prompt": 一行英文 Midjourney v6 提示词（适合生成这一帧）
-- "midjourney_negative_prompt": 一行英文负面提示词
-- "video_prompt_en": 若干句英文视频提示词，适合 SORA/VEO（描述人物、动作、场景、机位、光线和时长）
+  "character_action_detail_zh": (
+    "专门描述人物动作的细节，用 1～3 句完整中文，从“头部→上肢→躯干→下肢”的顺序写。"
+    "必须说清：1）此刻身体重心位置（例如：前倾、后仰、蹲下、腾空、贴在某物表面）；"
+    "2）双手/手指在做什么动作（例如：右手死死抓住机翼边缘，左手撑住摩托车车把，手指吃力绷紧）；"
+    "3）双腿/脚的姿态和指向（例如：双腿夹紧油箱，脚尖朝外伸直，右脚刚离开山坡边缘）；"
+    "4）与道具或环境的具体接触点（例如：膝盖抵在机翼表面、脚跟踩在栏杆上）。"
+    "禁止写成“人物奔跑/跳跃”这种笼统描述，必须写到读者能在脑中看到具体肢体姿态。"
+  ),
+
+  "face_expression_detail_zh": (
+    "专门描述面部表情与眼神变化，用 1～3 句中文写清："
+    "1）眉毛、眼睛、嘴角、下颌等肌肉的状态（紧绷/放松/抽动等）；"
+    "2）眼睛的细节：眼色、瞳孔大小、是否充血/泛光、是否有泪光；"
+    "3）如果有风、雨、拳头打在脸上等外力，脸部是否出现形变、抖动、回弹。"
+  ),
+
+  "cloth_hair_reaction_zh": (
+    "用 1～3 句中文写清人物头发和衣服对风/动作/爆炸/惯性的反应。"
+    "例如：长发被大风向后吹起、刘海贴在脸上、外套被风鼓起又被压回、下摆在奔跑时有延迟甩动感。"
+  ),
+
+  "environment_detail_zh": (
+    "用 2～4 句中文，按照 前景 / 中景 / 背景 的层次，尽可能具体地描述场景环境。必须写出："
+    "1）空间类型（室内/室外、厨房/街道/仓库/办公室/宇宙飞船舱室等）；"
+    "2）前景靠近镜头的物体和质感（例如桌面、栏杆、玻璃、光屏，写清颜色/材质/是否虚化）；"
+    "3）中景主体周围的环境结构（墙面、柜子、机器、车辆、人群等）；"
+    "4）背景中可识别的建筑/山体/城市天际线/窗外景色；"
+    "5）地面和顶部的感觉（例如：水泥地、木地板、带油污的瓷砖地、裸露管线的天花板）。"
+    "不要只写“在一个房间里”，必须写到能让美术师按文字搭景的程度。"
+    "如画面以天空/云层/海面等为主，也要写出云层形态、海浪走势、远处地貌等。"
+  ),
+
+  "weather_force_detail_zh": (
+    "如果画面中有风、雨、雪、爆炸冲击波、车辆高速行驶带来的气流等，请用 1～3 句中文具体写出："
+    "1）这些环境力来自哪个方向（例如：从左侧斜上方吹来、从人物身后涌来）；"
+    "2）它们如何作用在人物和环境上（例如：雨点抽打在脸上和衣服上、风把水面吹起浪花）；"
+    "3）是否造成明显晃动、震动或其他反馈。若画面没有明显环境力，可写“无明显风雨或环境冲击”。"
+  ),
+
+  "props_and_tech_detail_zh": (
+    "用 1～3 句中文，列出画面中最重要的 3～8 个道具/科技元素，并说明它们的外观、位置和状态。"
+    "例如：“左前景是一个银色笔记本电脑，屏幕发出冷蓝色光；人物右手边有一台黑色咖啡机，机身有水渍反光；"
+    "背景墙上挂着两幅抽象画；天空中有两架无人机从左向右飞过；画面右侧是一块半透明蓝色全息屏幕，悬浮在空中，显示数据图表”。"
+  ),
+
+  "physics_reaction_detail_zh": (
+    "用 1～3 句中文，专门描述“受力”与“形变→回弹”的过程。"
+    "例如：拳头砸在人物脸上导致脸颊被明显挤压、下巴偏移，随后肌肉抖动并缓慢回弹；"
+    "或者车辆撞上护栏时车头被压扁、车身抖动、人物身体被安全带拉扯后弹回。"
+  ),
+
+  "structure_damage_detail_zh": (
+    "用 1～3 句中文描述物体或结构本身的损坏情况，例如：车头金属折叠、挡风玻璃开裂、建筑墙体塌陷、机翼断裂等，"
+    "写清“哪一部分”因撞击或爆炸产生了怎样的形变或破损。"
+  ),
+
+  "debris_motion_detail_zh": (
+    "用 1～3 句中文描述碎片/玻璃渣/零件/石块等飞散的轨迹和状态："
+    "例如：挡风玻璃碎片向前方和右上方抛洒，形成扇形弧线，随后落在地面；"
+    "建筑碎石向下坠落时扬起灰尘。若画面无明显碎片飞散，可写“无明显碎片飞散”。"
+  ),
+
+  "motion_detail_zh": (
+    "用 1～3 句中文，从“上一瞬间→当前瞬间→下一瞬间”的顺序，描述这一镜头所属动作片段。"
+    "如果能从画面推断出大致动作，请写清：上一瞬间人物大概在做什么，当前瞬间画面定格在什么状态，下一瞬间极有可能发生什么。"
+  ),
+
+  "fx_detail_zh": (
+    "如果画面中有火花、烟雾、尘土、能量波、魔法特效、碎裂粒子等，请用 1～2 句中文描述它们的位置、颜色和运动方向。"
+  ),
+
+  "lighting_color_detail_zh": (
+    "在 color_and_light_zh 的基础上，进一步用 1～2 句中文精细描述光源数量、方向、色温差异、"
+    "是否有闪电/爆光/频闪等。"
+  ),
+
+  "audio_cue_detail_zh": (
+    "用 1～3 句中文描述这一帧所在片段的声音设计："
+    "包括环境声（风声、雨声、车辆噪音、机器运转）、人物台词、特效声（打击声、爆炸声）以及 BGM 的情绪和节奏点。"
+  ),
+
+  "edit_rhythm_detail_zh": (
+    "用 1～2 句中文描述剪辑节奏和时间处理，例如：正常速度、轻微慢动作、大幅慢动作、突然加速、甩镜转场、闪白转场等。"
+  ),
+
+  "midjourney_prompt": "一行英文 Midjourney v6 提示词，适合生成这一帧的静态分镜图",
+  "midjourney_negative_prompt": "一行英文负面提示词，例如：text, subtitle, watermark, extra fingers, deformed hands, distorted face, low resolution, blurry, cartoon, anime, painting",
+
+  "video_prompt_en": (
+    "一段英文视频提示词，适合给 SORA/VEO 使用。用 3-5 句描述：人物外观、当前动作、"
+    "运镜方式（要说明是追随视角/第一人称/侧向跟拍等以及镜头移动方向）、"
+    "环境地形（例如 winding coastal mountain road, steep cliff, ocean on the left），以及光线与氛围。"
+    "最后一句写清这是一段几秒钟的镜头，例如：'4 second shot, vertical 9:16, 24fps, cinematic, highly detailed.'"
+  )
+}}
 
 要求：
-1. 一定要是合法 JSON，所有 key 使用双引号，不能有注释、不能有多余逗号。
-2. 所有上述字段都必须出现（即使内容为空字符串或空数组）。
-3. 只输出 JSON，不要额外文字。
+1. 只输出一个 JSON 对象，不要任何解释或额外文字。
+2. 所有字符串必须使用双引号，不要使用单引号。
+3. JSON 中不能有注释，不能有多余的逗号。
 """
         resp = model.generate_content([prompt, img])
         text = _extract_text_from_response(resp)
@@ -345,7 +456,6 @@ def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
         json_str = text[start : end + 1]
         info = json.loads(json_str)
 
-        # 补齐字段，避免 KeyError
         info["index"] = index
         info.setdefault("scene_description_zh", "")
         info.setdefault("tags_zh", [])
@@ -384,7 +494,6 @@ def analyze_single_image(img: Image.Image, model, index: int) -> Dict[str, Any]:
         return info
 
     except Exception as e:
-        # 出错时返回空壳，保证后续流程不炸
         return {
             "index": index,
             "scene_description_zh": f"（AI 分析失败：{e}）",
@@ -527,7 +636,7 @@ def analyze_images_concurrently(
 
 
 # ========================
-# 整体剧情分析
+# 整体视频层面的总结
 # ========================
 
 def analyze_overall_video(frame_infos: List[Dict[str, Any]], model) -> str:
@@ -594,7 +703,7 @@ def analyze_overall_video(frame_infos: List[Dict[str, Any]], model) -> str:
 
 
 # ========================
-# 10 秒广告旁白脚本
+# 10 秒广告旁白脚本生成
 # ========================
 
 def generate_ad_script(frame_infos: List[Dict[str, Any]], model) -> str:
@@ -649,7 +758,7 @@ def generate_ad_script(frame_infos: List[Dict[str, Any]], model) -> str:
 
 
 # ========================
-# 时间轴简版总览
+# 时间轴分镜脚本生成（纯拼接版）
 # ========================
 
 def generate_timeline_shotlist(
@@ -657,68 +766,115 @@ def generate_timeline_shotlist(
     used_range: Tuple[float, float],
 ) -> str:
     """
-    简版时间轴总览：
-    - 不再逐帧展开
-    - 自动将整段视频分成 3~5 段，给出简要描述（画面+动作+情绪）
-    - 方便“自己看一眼就懂整条视频结构”
+    不再调用 AI，总结 = 把每帧分析到的所有内容结构化搬到时间轴里。
+
+    时间轴分段规则：
+    - 从 0 开始计时，以分析区间长度 / 帧数 均分每段时长
+    - 第 i 帧对应时间段 [t_i, t_{i+1}]，尽量保证段落连续、不重叠
     """
-
-    def short(text: str, max_len: int = 50) -> str:
-        text = (text or "").strip()
-        if len(text) <= max_len:
-            return text
-        return text[:max_len].rstrip("，,；;。.!?？！ ") + "…"
-
     n = len(frame_infos)
     if n == 0:
-        return "（暂无关键帧，无法生成时间轴总览。）"
+        return "（暂无关键帧，无法生成时间轴分镜脚本。）"
 
     start_used, end_used = used_range
     total_len = max(0.1, end_used - start_used)
+    seg = total_len / n
 
-    # 决定分几段：短 → 3 段，中 → 4 段，长 → 5 段
-    if total_len <= 6:
-        seg_count = 3
-    elif total_len <= 12:
-        seg_count = 4
-    else:
-        seg_count = 5
+    lines: List[str] = []
 
-    seg_len = total_len / seg_count
-    segments = []
+    for i, info in enumerate(frame_infos):
+        t0 = i * seg
+        t1 = (i + 1) * seg
+        if i == n - 1:
+            t1 = total_len
 
-    for s in range(seg_count):
-        t0 = s * seg_len
-        t1 = total_len if s == seg_count - 1 else (s + 1) * seg_len
-        # 取这一段中点对应的帧
-        mid_t = (t0 + t1) / 2
-        mid_index = int(mid_t / total_len * (n - 1) + 0.5)
-        mid_index = max(0, min(n - 1, mid_index))
-        info = frame_infos[mid_index]
+        shot_id = f"S{i+1:02d}"
 
-        scene = info.get("scene_description_zh", "")
-        char_act = info.get("character_action_detail_zh", "")
-        motion = info.get("motion_detail_zh", "")
-        mood = info.get("mood_zh", "")
+        cam = info.get("camera", {}) or {}
+        tags = info.get("tags_zh", []) or []
 
-        parts = []
+        scene = (info.get("scene_description_zh") or "").strip()
+        char_act = (info.get("character_action_detail_zh") or "").strip()
+        env = (info.get("environment_detail_zh") or "").strip()
+        props = (info.get("props_and_tech_detail_zh") or "").strip()
+        motion = (info.get("motion_detail_zh") or "").strip()
+        mood = (info.get("mood_zh") or "").strip()
+
+        shot_type = cam.get("shot_type_zh", "")
+        angle = cam.get("angle_zh", "")
+        movement = cam.get("movement_zh", "")
+        composition = cam.get("composition_zh", "")
+
+        face = (info.get("face_expression_detail_zh") or "").strip()
+        cloth_hair = (info.get("cloth_hair_reaction_zh") or "").strip()
+        weather = (info.get("weather_force_detail_zh") or "").strip()
+        physics = (info.get("physics_reaction_detail_zh") or "").strip()
+        structure_damage = (info.get("structure_damage_detail_zh") or "").strip()
+        debris_motion = (info.get("debris_motion_detail_zh") or "").strip()
+        fx = (info.get("fx_detail_zh") or "").strip()
+        lighting = (info.get("lighting_color_detail_zh") or "").strip()
+        audio = (info.get("audio_cue_detail_zh") or "").strip()
+        edit = (info.get("edit_rhythm_detail_zh") or "").strip()
+
+        block_lines: List[str] = []
+        block_lines.append(f"【{shot_id} | {t0:.1f}-{t1:.1f} 秒】")
+
         if scene:
-            parts.append(short(scene, 60))
+            block_lines.append(f"画面内容：{scene}")
         if char_act:
-            parts.append("动作：" + short(char_act, 40))
-        if motion:
-            parts.append("趋势：" + short(motion, 40))
+            block_lines.append(f"人物动作：{char_act}")
+        if face:
+            block_lines.append(f"面部与眼神：{face}")
+        if cloth_hair:
+            block_lines.append(f"服装与头发：{cloth_hair}")
+
+        if env:
+            block_lines.append(f"场景与空间：{env}")
+        if weather:
+            block_lines.append(f"天气与环境力：{weather}")
+
+        if props:
+            block_lines.append(f"道具与科技：{props}")
+        if structure_damage:
+            block_lines.append(f"结构损坏：{structure_damage}")
+        if debris_motion:
+            block_lines.append(f"碎片与飞散轨迹：{debris_motion}")
+        if physics:
+            block_lines.append(f"受力与物理反馈：{physics}")
+
+        if fx:
+            block_lines.append(f"特效与粒子：{fx}")
+        if lighting:
+            block_lines.append(f"光线与色彩：{lighting}")
+
+        cam_desc_parts = []
+        if shot_type:
+            cam_desc_parts.append(f"景别：{shot_type}")
+        if angle:
+            cam_desc_parts.append(f"角度：{angle}")
+        if movement:
+            cam_desc_parts.append(f"运镜：{movement}")
+        if composition:
+            cam_desc_parts.append(f"构图：{composition}")
+        if cam_desc_parts:
+            block_lines.append("机位与运动：" + "；".join(cam_desc_parts))
+
         if mood:
-            parts.append("情绪：" + short(mood, 30))
+            block_lines.append(f"情绪氛围：{mood}")
+        if motion:
+            block_lines.append(f"动作趋势：{motion}")
 
-        text = "；".join(parts) if parts else "（本段未检测到有效描述）"
-        segments.append((t0, t1, text))
+        if audio:
+            block_lines.append(f"声音与节奏：{audio}")
+        if edit:
+            block_lines.append(f"剪辑与节奏：{edit}")
 
-    lines = ["【整段时间轴总览】"]
-    for i, (t0, t1, text) in enumerate(segments, start=1):
-        lines.append(f"【第{i}段 | {t0:.1f}-{t1:.1f} 秒】{text}")
+        if tags:
+            block_lines.append("标签：" + " ".join(tags))
 
-    return "\n".join(lines)
+        lines.append("\n".join(block_lines))
+
+    return "\n\n".join(lines)
 
 
 # ========================
@@ -743,23 +899,18 @@ with st.sidebar:
         value=10,
         step=1,
     )
-    st.caption("建议：10 秒视频 6~10 帧即可；超出部分仍显示截图和色卡，但不调 AI。")
+    st.caption("建议：10 秒视频 6~10 帧即可；超出部分仍会显示截图和色卡，但不调 AI。")
 
     st.markdown("---")
     st.markdown("⏱ 分析时间范围（单位：秒）")
     start_sec = st.number_input(
-        "从第几秒开始（含）",
-        min_value=0.0,
-        value=0.0,
-        step=0.5,
-        help="精确到 0.5 秒；默认 0 表示从头开始",
+        "从第几秒开始（含）", min_value=0.0, value=0.0, step=0.5,
+        help="精确到 0.5 秒；默认 0 表示从头开始"
     )
     end_sec = st.number_input(
         "到第几秒结束（0 或 ≤开始秒 表示直到结尾）",
-        min_value=0.0,
-        value=0.0,
-        step=0.5,
-        help="例如：只分析 3~8 秒，就填 3 和 8；填 0 或不大于开始秒则分析到结尾",
+        min_value=0.0, value=0.0, step=0.5,
+        help="例如：只分析 3~8 秒，就填 3 和 8；填 0 或不大于开始秒则分析到结尾"
     )
 
     if not api_key:
@@ -783,7 +934,7 @@ if api_key:
 
 
 # ========================
-# 主流程
+# 主流程：上传/链接 选择 + 抽帧 + 分析 + 布局展示
 # ========================
 
 source_mode = st.radio(
@@ -870,8 +1021,8 @@ if st.button("🚀 一键解析整条视频"):
                         palette_colors = []
                     frame_palettes.append(palette_colors)
 
-                # 4. 控制本次 AI 调用总数：帧级分析 + 整体 + 广告
-                overhead_calls = 2  # overall + ad_script
+                # ⭐ 控制本次 AI 调用总数不超过免费 10 次
+                overhead_calls = 2  # 整体 + 广告文案
                 max_ai_frames_safe = max(
                     1,
                     min(max_ai_frames, FREE_TIER_RPM_LIMIT - overhead_calls),
@@ -882,23 +1033,23 @@ if st.button("🚀 一键解析整条视频"):
                         f"（侧边栏设置为 {max_ai_frames} 帧）。"
                     )
 
-                # 5. 帧级分析
+                # 4. 帧级分析
                 with st.spinner("🧠 正在为关键帧生成结构化分析 + MJ 提示词 + 视频提示词..."):
                     frame_infos = analyze_images_concurrently(
                         images, model, max_ai_frames=max_ai_frames_safe
                     )
 
-                # 6. 整体分析 + 广告 + 时间轴总览
+                # 5. 整体分析 + 广告文案 + 时间轴分镜（时间轴为纯拼接）
                 with st.spinner("📚 正在生成整段视频的剧情大纲与话题标签..."):
                     overall = analyze_overall_video(frame_infos, model)
                 with st.spinner("🎤 正在生成 10 秒广告旁白脚本..."):
                     ad_script = generate_ad_script(frame_infos, model)
-                with st.spinner("🎬 正在生成时间轴总览（简版）..."):
+                with st.spinner("🎬 正在生成时间轴分镜脚本（纯拼接版）..."):
                     timeline_shotlist = generate_timeline_shotlist(
                         frame_infos, used_range=used_range
                     )
 
-                # 7. 组装导出 JSON + 历史记录
+                # 6. 组装 export_data + 写入历史记录
                 export_frames = []
                 for info, palette in zip(frame_infos, frame_palettes):
                     export_frames.append(
@@ -963,11 +1114,11 @@ if st.button("🚀 一键解析整条视频"):
                 )
                 st.session_state["analysis_history"] = history
 
-                # 8. 多标签页展示
+                # 7. Tabs 展示
                 tab_frames, tab_story, tab_json, tab_history = st.tabs(
                     [
                         "🎞 关键帧 & 提示词",
-                        "📚 剧情总结 & 广告旁白 & 时间轴总览",
+                        "📚 剧情总结 & 广告旁白 & 时间轴分镜",
                         "📦 JSON 导出（本次）",
                         "🕘 历史记录（本会话）",
                     ]
@@ -1009,7 +1160,6 @@ if st.button("🚀 一键解析整条视频"):
                             with c2:
                                 cam = info.get("camera", {})
                                 tags = info.get("tags_zh", [])
-
                                 analysis_lines = [
                                     f"【景别】{cam.get('shot_type_zh', '')}",
                                     f"【运镜】{cam.get('movement_zh', '')}",
@@ -1039,14 +1189,41 @@ if st.button("🚀 一键解析整条视频"):
                                 st.markdown("**场景细节（可复制）：**")
                                 scene_detail = info.get("environment_detail_zh", "")
                                 props_detail = info.get("props_and_tech_detail_zh", "")
-                                scene_text = (
-                                    scene_detail
-                                    + ("\n\n道具与科技元素：" + props_detail if props_detail else "")
-                                ).strip()
+                                scene_text = (scene_detail + "\n\n道具与科技元素：" + props_detail).strip()
                                 st.code(
                                     scene_text or "（暂无场景细节，可能未做 AI 分析）",
                                     language="markdown",
                                 )
+
+                                # 高级物理/环境细节组合展示
+                                advanced_detail = []
+                                if info.get("face_expression_detail_zh"):
+                                    advanced_detail.append("【面部与眼神】" + info["face_expression_detail_zh"])
+                                if info.get("cloth_hair_reaction_zh"):
+                                    advanced_detail.append("【服装与头发】" + info["cloth_hair_reaction_zh"])
+                                if info.get("weather_force_detail_zh"):
+                                    advanced_detail.append("【天气与环境力】" + info["weather_force_detail_zh"])
+                                if info.get("physics_reaction_detail_zh"):
+                                    advanced_detail.append("【受力与物理反馈】" + info["physics_reaction_detail_zh"])
+                                if info.get("structure_damage_detail_zh"):
+                                    advanced_detail.append("【结构损坏】" + info["structure_damage_detail_zh"])
+                                if info.get("debris_motion_detail_zh"):
+                                    advanced_detail.append("【碎片飞散】" + info["debris_motion_detail_zh"])
+                                if info.get("fx_detail_zh"):
+                                    advanced_detail.append("【特效与粒子】" + info["fx_detail_zh"])
+                                if info.get("lighting_color_detail_zh"):
+                                    advanced_detail.append("【光线细节】" + info["lighting_color_detail_zh"])
+                                if info.get("audio_cue_detail_zh"):
+                                    advanced_detail.append("【声音与节奏】" + info["audio_cue_detail_zh"])
+                                if info.get("edit_rhythm_detail_zh"):
+                                    advanced_detail.append("【剪辑节奏】" + info["edit_rhythm_detail_zh"])
+
+                                if advanced_detail:
+                                    st.markdown("**高级物理 / 环境细节（可复制）：**")
+                                    st.code(
+                                        "\n".join(advanced_detail),
+                                        language="markdown",
+                                    )
 
                                 st.markdown("**SORA / VEO 视频提示词（英文，可复制）：**")
                                 st.code(
@@ -1063,7 +1240,7 @@ if st.button("🚀 一键解析整条视频"):
 
                             st.markdown("---")
 
-                # --- Tab2：整体分析 + 广告文案 + 时间轴总览 ---
+                # --- Tab2：整体分析 + 广告文案 + 时间轴分镜 ---
                 with tab_story:
                     st.markdown("### 📚 整体剧情与视听风格总结")
                     st.code(overall, language="markdown")
@@ -1071,7 +1248,7 @@ if st.button("🚀 一键解析整条视频"):
                     st.markdown("### 🎤 10 秒广告旁白脚本")
                     st.code(ad_script, language="markdown")
 
-                    st.markdown("### 🎬 时间轴总览（简版，可复制）")
+                    st.markdown("### 🎬 时间轴分镜脚本（可复制）")
                     st.code(timeline_shotlist, language="markdown")
 
                 # --- Tab3：本次 JSON 导出 ---
@@ -1090,7 +1267,7 @@ if st.button("🚀 一键解析整条视频"):
                         )
                         st.code(preview, language="json")
 
-                # --- Tab4：历史记录 ---
+                # --- Tab4：历史记录（当前会话） ---
                 with tab_history:
                     st.markdown("### 🕘 当前会话历史记录（刷新页面会清空）")
 
