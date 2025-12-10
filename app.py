@@ -878,18 +878,13 @@ with tab_video:
             # 帧分析（视觉）
             with st.spinner("🧠 正在调用视觉模型分析关键帧…"):
                 frame_infos = analyze_images_concurrently_zai(
-                    api_key=api_key,
-                    vision_model=vision_model,
-                    images=images,
-                    frame_infos = analyze_images_concurrently_zai(
     api_key=api_key,
     vision_model=vision_model,
     images=images,
     max_ai_frames=int(max_ai_frames),
     limiter=limiter,
     max_workers=int(max_workers),
-)
-                    ,
+)                    ,
                     limiter=limiter,
                     max_workers=int(max_workers),
                 )
