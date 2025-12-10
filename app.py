@@ -881,7 +881,14 @@ with tab_video:
                     api_key=api_key,
                     vision_model=vision_model,
                     images=images,
-                    max_ai_frames=int(max_ai_frames):
+                    frame_infos = analyze_images_concurrently_zai(
+    api_key=api_key,
+    vision_model=vision_model,
+    images=images,
+    max_ai_frames=int(max_ai_frames),
+    limiter=limiter,
+    max_workers=int(max_workers),
+)
                     ,
                     limiter=limiter,
                     max_workers=int(max_workers),
